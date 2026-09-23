@@ -1,0 +1,8 @@
+{
+  "name": "claude-setup",
+  "description": "Sets up, audits, and improves Claude Code for any project: learns the codebase and (with permission) past sessions, scores CLAUDE.md, hooks, permissions, skills, agents and MCP config, then fixes it or builds a tailored setup from scratch.",
+  "version": "1.0.0",
+  "author": { "name": "TheFunnyMan120" },
+  "license": "MIT",
+  "keywords": ["claude-md", "setup", "audit", "hooks", "permissions", "skills", "agents"]
+}

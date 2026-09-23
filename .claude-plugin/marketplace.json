@@ -1,0 +1,15 @@
+{
+  "name": "claude-setup",
+  "description": "Claude Code plugin that sets up, audits, and improves Claude Code configurations.",
+  "owner": {
+    "name": "TheFunnyMan120"
+  },
+  "plugins": [
+    {
+      "name": "claude-setup",
+      "source": "./",
+      "description": "Sets up, audits, and improves Claude Code for any project.",
+      "version": "1.0.0"
+    }
+  ]
+}
