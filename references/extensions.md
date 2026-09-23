@@ -102,6 +102,20 @@ Enabled via `enabledPlugins` in settings. Marketplaces are added with `claude pl
 Checks: plugins from unknown marketplaces carry hooks and MCP servers that run code, so review them like any hook or MCP server. Look for disabled or unused plugins still listed, and for plugin skills that duplicate local ones.
 Suggest packaging as a plugin when the user has a set of skills, agents, and hooks they copy between projects or share with a team.
 
+## Context budget (MCP servers, plugins, listings)
+
+Instruction files are only part of what Claude carries. Every enabled plugin, skill, agent, and MCP server adds to it. The inventory's `context_budget` lists MCP servers from the project `.mcp.json`, from `~/.claude.json` (user scope and this project's local scope), and from enabled plugins. It also estimates the skill and agent listing tokens. Desktop-app and claude.ai connectors aren't on disk, so read them off the MCP tools in your own context or `/mcp`. Point the user to `/context` for exact per-category numbers.
+
+Keep it proportionate. Current Claude Code defers MCP tool definitions through tool search, so an idle server costs far less than it used to. The real costs are:
+- **Unused servers:** noise in tool search, extra startup processes, and failures or auth prompts every session (for example a server that "needs authentication" or "failed to connect" on each launch). Cross-check with `sessions.py` `mcp_servers_used`. A server with 0 calls across many sessions is a removal or disable candidate for this project (`disabledMcpServers`, or remove it from that scope).
+- **Wrong scope:** a server that only one project uses, configured at user scope or through a plugin, so it loads everywhere. Move it to local or project scope.
+- **Duplicates:** the same service through a plugin and a direct config, or two servers covering one API.
+- **Heavy output:** servers that routinely return huge results (over 10k tokens warns, the cap is 25k). Suggest narrower queries, or setting `MAX_MCP_OUTPUT_TOKENS` deliberately.
+- **Plugin sprawl:** enabled plugins whose skills, agents, or servers never show up in sessions. Suggest disabling them per project, or at user scope if they're unused everywhere.
+- **Listing bloat:** dozens of skills and agents with long descriptions (the `skill_listing_approx_tokens` estimate), especially duplicates of the same skill across user, plugin, and account scopes.
+
+Recommend removals only with usage evidence, and phrase them as "disable here" rather than "uninstall", because a server that's unused in one repo may be vital in another.
+
 ## Cross-cutting checks
 
 - **Inventory bloat.** Dozens of user-level skills or agents with vague descriptions add listing tokens to every session and misfire. Recommend pruning unused ones.

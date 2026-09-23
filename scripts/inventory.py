@@ -12,6 +12,7 @@ Usage:
   python inventory.py [--project PATH] [--no-user] [--json]
 """
 import argparse
+import collections
 import fnmatch
 import json
 import os
@@ -774,7 +775,51 @@ def main():
         mem["approx_tokens_loaded"] = mem_tokens
         total += mem_tokens
     report["always_loaded_approx_tokens"] = total
-    report["always_loaded_note"] = "CLAUDE.md stack + unscoped rules + MEMORY.md index (chars/4); excludes imports, skill/agent listings, MCP tools"
+    report["always_loaded_note"] = "CLAUDE.md stack + unscoped rules + MEMORY.md index (chars/4); skill/agent listings and MCP are in context_budget"
+
+    # context budget beyond instruction files: skill/agent listings + every MCP server in reach
+    budget = {"skill_listing_approx_tokens": round(sum(s.get("description_chars") or 0 for s in report["skills"]) / 4),
+              "agent_listing_approx_tokens": round(sum(a.get("description_chars") or 0 for a in report["agents"]) / 4),
+              "skills": len(report["skills"]), "agents": len(report["agents"]), "mcp_servers": []}
+    for m in report["mcp"]:
+        for s in m.get("servers", []):
+            budget["mcp_servers"].append({"name": s["name"], "scope": "project (.mcp.json)"})
+    if not args.no_user:
+        try:
+            gc = json.loads(read_text(HOME / ".claude.json") or "{}")
+        except Exception:
+            gc = {}
+        for n in (gc.get("mcpServers") or {}):
+            budget["mcp_servers"].append({"name": n, "scope": "user (~/.claude.json)"})
+        pkey = next((k for k in (gc.get("projects") or {}) if Path(k).resolve() == project), None)
+        pentry = (gc.get("projects") or {}).get(pkey, {}) if pkey else {}
+        for n in (pentry.get("mcpServers") or {}):
+            budget["mcp_servers"].append({"name": n, "scope": "local (~/.claude.json, this project)"})
+        disabled = (pentry.get("disabledMcpjsonServers") or []) + (pentry.get("disabledMcpServers") or [])
+        if disabled:
+            budget["disabled_mcp"] = disabled
+        try:
+            enabled = (json.loads(read_text(USER_CLAUDE / "settings.json") or "{}") or {}).get("enabledPlugins", {}) or {}
+            installed = (json.loads(read_text(USER_CLAUDE / "plugins" / "installed_plugins.json") or "{}") or {}).get("plugins", {})
+        except Exception:
+            enabled, installed = {}, {}
+        budget["plugins_enabled"] = sum(1 for v in enabled.values() if v)
+        for key, entries in installed.items():
+            if enabled.get(key) is not True:
+                continue
+            for e in (entries or [])[:1]:
+                try:
+                    pm = json.loads(read_text(Path(e.get("installPath", "")) / ".mcp.json") or "{}")
+                except Exception:
+                    pm = {}
+                for n in (pm.get("mcpServers") or pm if isinstance(pm, dict) else {}):
+                    if isinstance(n, str) and n != "mcpServers":
+                        budget["mcp_servers"].append({"name": n, "scope": f"plugin ({key.split('@')[0]})"})
+    names = collections.Counter(s["name"].lower() for s in budget["mcp_servers"])
+    budget["duplicate_mcp_names"] = [n for n, c in names.items() if c > 1]
+    budget["note"] = ("Desktop-app and claude.ai connector servers are not on disk: compare with the MCP tools in your "
+                      "own context or `/mcp`. `/context` gives exact per-category token use.")
+    report["context_budget"] = budget
 
     json.dump(report, sys.stdout, indent=1 if not args.json else None, default=str, ensure_ascii=False)
     print()

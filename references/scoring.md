@@ -22,7 +22,7 @@ Score each category from what you actually verified. When a category doesn't app
 |---|---|---|---|
 | 1 | **Instruction quality** | 25 | Every line passes "would removing this cause a mistake?". Commands are verified to exist. Gotchas and project-specific decisions dominate. Wording is specific and checkable. There is no tour, no generic advice, and no boilerplate. |
 | 2 | **Accuracy & freshness** | 15 | No stale commands, paths, or tools. Nothing contradicts the code, and nothing contradicts across the files in the stack. |
-| 3 | **Context economy** | 15 | Each file is under 200 lines and the always-loaded total is lean. Area-specific content sits in scoped rules or nested files, and procedures sit in skills. Imports and unscoped rules aren't posing as savings. The MEMORY.md index is within its limits. |
+| 3 | **Context economy** | 15 | Each file is under 200 lines and the always-loaded total is lean. Area-specific content sits in scoped rules or nested files, and procedures sit in skills. Imports and unscoped rules aren't posing as savings. The MEMORY.md index is within its limits. There are no unused, duplicated, or wrongly scoped MCP servers or plugins, and the skill/agent listing isn't bloated. |
 | 4 | **Enforcement fit** | 10 | Must-always and must-never rules are hooks or permission rules, not prose. Hooks back the rules that matter. |
 | 5 | **Permissions & secrets** | 20 | No high-severity items. Secrets have Read denies. There are no literal secrets anywhere. Allow rules are scoped, with no dead or ignored rules. Local files are gitignored. |
 | 6 | **Hooks & MCP safety** | 5 | Variables quoted, paths anchored, input validated, hooks fast and fail-safe. MCP servers are pinned and trusted, with secrets expanded from env. |

@@ -206,6 +206,11 @@ def main():
         if ps:
             openers[" ".join(norm_words(ps[0])[:4])] += 1
 
+    mcp_by_server = collections.Counter()
+    for name, c in tools.items():
+        if name.startswith("mcp__"):
+            mcp_by_server[name.split("__")[1]] += c
+
     top_edit_dirs = collections.Counter()
     for p, c in edited.items():
         parts = p.split("/")
@@ -230,6 +235,8 @@ def main():
         "files_most_edited": edited.most_common(20),
         "areas_most_edited": top_edit_dirs.most_common(12),
         "tools": dict(tools.most_common(25)),
+        "mcp_servers_used": dict(collections.Counter(
+            {k: v for k, v in mcp_by_server.items()}).most_common(40)),
         "skills_used": dict(skills.most_common(20)),
         "subagents_used": dict(agents.most_common(15)),
         "slash_commands_used": dict(slash.most_common(20)),

@@ -17,7 +17,7 @@ Knowledge lives in reference files. Read only what the current step needs.
 | [references/codebase-analysis.md](references/codebase-analysis.md) | Understanding the repo: sizing, subagent briefs, gap analysis, recommendations catalog |
 | [references/sessions.md](references/sessions.md) | Mining past sessions for repeated tasks, corrections, and failures |
 | [references/claude-md.md](references/claude-md.md) | Judging CLAUDE.md, rules, or AGENTS.md content, or deciding where knowledge belongs |
-| [references/extensions.md](references/extensions.md) | Reviewing or writing skills, subagents, commands, output styles, plugins |
+| [references/extensions.md](references/extensions.md) | Reviewing or writing skills, subagents, commands, output styles, plugins, and the context budget (MCP servers, plugin sprawl, listing size) |
 | [references/safety.md](references/safety.md) | Settings, permissions, hooks, .mcp.json, secrets |
 | [references/scoring.md](references/scoring.md) | Scoring and writing the report |
 | [templates/](templates/) | Creating any new file (CLAUDE.md, settings, rule, skill, agent, hook guard) |
@@ -98,6 +98,7 @@ Learned from real runs:
 - **Relative hook paths fail open.** A guard hook whose script can't be found exits non-2, so the action goes through.
 - **The AGENTS.md mode can't be read from files.** Assume the default (CLAUDE.md wins) and state that assumption.
 - **Stale git worktrees duplicate files.** `.claude/worktrees/` contains copies of CLAUDE.md and friends. Exclude them from searches and suggest `git worktree remove`.
+- **Bloat usually comes from MCP servers and plugins, not CLAUDE.md.** Check `context_budget` against `mcp_servers_used` from the session scan. Recommend "disable here" for servers unused in this project, not uninstalling everywhere.
 - **Account and org skills aren't on disk.** To find duplicates, compare against the skill list in your own context, not just `~/.claude/skills`.
 - **Windows:** `python3` is often a Store stub, so use `python` or `py`. Paths with spaces break unquoted hooks.
 - **Don't out-write the model.** Setup advice that restates what Claude does by default is noise. Recommend only what changes its behavior in this repo.
