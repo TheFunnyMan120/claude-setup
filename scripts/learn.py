@@ -39,7 +39,7 @@ FILE_REL = Path(".claude") / "setup-suggestions.md"
 STATE_BEGIN, STATE_END = "<!-- claude-setup:state", "-->"
 CHILD_ENV = "CLAUDE_SETUP_LEARN_CHILD"
 HOOK_NAME = "claude-setup-learn.py"
-VERSION = "2.0.2"  # installed copies carry this; inventory.py flags copies older than the skill's
+VERSION = "2.0.3"  # installed copies carry this; inventory.py flags copies older than the skill's
 MODEL = "sonnet"
 IS_CLOUD = os.environ.get("CLAUDE_CODE_REMOTE", "").lower() == "true"
 
@@ -132,7 +132,7 @@ def project_root(cwd):
     cwd = Path(cwd or os.getcwd()).resolve()
     try:
         out = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True,
-                             text=True, timeout=10)
+                             encoding="utf-8", errors="replace", timeout=10)
         if out.returncode == 0 and out.stdout.strip():
             return Path(out.stdout.strip())
     except (OSError, subprocess.SubprocessError):
@@ -430,7 +430,7 @@ def exclude_locally(root):
         if chk.returncode == 0:
             return
         gd = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=root,
-                            capture_output=True, text=True, timeout=10)
+                            capture_output=True, encoding="utf-8", errors="replace", timeout=10)
         if gd.returncode != 0:
             return
         ex = Path(root) / gd.stdout.strip()
@@ -605,12 +605,16 @@ def call_model(prompt, budget):
            "--max-budget-usd", str(budget), "--setting-sources", "project",
            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands"]
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    r = None
     try:
-        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=300, env=env,
-                           cwd=STATE_DIR)
+        # explicit utf-8: Windows defaults to the ANSI code page, and a non-ASCII character in
+        # CLAUDE.md made the stdin write fail silently, so claude got no prompt
+        r = subprocess.run(cmd, input=prompt, capture_output=True, encoding="utf-8", errors="replace",
+                           timeout=300, env=env, cwd=STATE_DIR)
         out = json.loads(r.stdout)
     except (OSError, subprocess.SubprocessError, ValueError) as e:
-        log(f"model call failed: {type(e).__name__}")
+        detail = clip(redact(r.stderr), 200) if r is not None and r.stderr else ""
+        log(f"model call failed: {type(e).__name__}" + (f" (stderr: {detail})" if detail else ""))
         return None
     log(f"model run: subtype={out.get('subtype')} cost=${out.get('total_cost_usd')}")
     so = out.get("structured_output")
@@ -699,7 +703,7 @@ def cmd_session_end(a):
 def dirty(root):
     try:
         r = subprocess.run(["git", "status", "--porcelain", "--", str(FILE_REL)], cwd=root,
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, encoding="utf-8", errors="replace", timeout=10)
         return bool(r.stdout.strip())
     except (OSError, subprocess.SubprocessError):
         return False

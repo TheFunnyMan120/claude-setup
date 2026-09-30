@@ -140,7 +140,7 @@ def scan_secrets(text, where):
 
 def git(args, cwd):
     try:
-        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=10)
         return r.returncode, r.stdout.strip()
     except Exception:
         return 127, ""
