@@ -58,6 +58,7 @@ If you turn it on, it watches for corrections you give Claude ("don't do X", "fr
 - **On your computer** it runs once at session end, in the background. The file is kept out of git.
 - **In cloud sessions** it runs at the end of a turn when there's something new, and the file is committed so it survives the container. On a shared repo, teammates can see it, so the skill warns you before turning it on there.
 - It runs Sonnet only. There's no cheaper-model option.
+- Each repo's suggestions file keeps itself current: anything you've already put in place is cleared automatically, and a git merge conflict in the file (two cloud branches) is merged by the hook itself. If you update the plugin, `/claude-setup` audit tells you when your installed hook copy is out of date.
 
 ## Privacy
 
