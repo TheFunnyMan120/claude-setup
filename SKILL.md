@@ -49,6 +49,8 @@ With no mode given, choose it yourself and say which you picked. If there's no C
 
 ### 1. Inventory
 
+Commands here say `python`. On macOS and Linux use `python3` (plain `python` often doesn't exist); on Windows use `python` or `py`.
+
 ```bash
 python "${CLAUDE_SKILL_DIR}/scripts/inventory.py" --project "<project root>"
 ```
@@ -107,7 +109,7 @@ Learned from real runs:
 - **Stale git worktrees duplicate files.** `.claude/worktrees/` contains copies of CLAUDE.md and friends. Exclude them from searches and suggest `git worktree remove`.
 - **Bloat usually comes from MCP servers and plugins, not CLAUDE.md.** Check `context_budget` against `mcp_servers_used` from the session scan. Recommend "disable here" for servers unused in this project, not uninstalling everywhere.
 - **Account and org skills aren't on disk.** To find duplicates, compare against the skill list in your own context, not just `~/.claude/skills`.
-- **Windows:** `python3` is often a Store stub, so use `python` or `py`. Paths with spaces break unquoted hooks.
+- **Python command:** macOS/Linux often have only `python3`; on Windows `python3` is often a Store stub, so use `python` or `py`. Paths with spaces break unquoted hooks.
 - **Learning hook upkeep:** if the inventory shows `learning_hook.installed[].outdated`, offer to reinstall at that scope (options are kept). If `suggestions_conflicted` is true, run `learn.py reconcile` to merge the conflict; never hand-pick a side.
 - **Never install the learning hook unasked,** and never as a side effect of fix or init. At most, mention it once in a report when sessions show the same correction recurring.
 - **Leave Anthropic's defaults alone.** Don't propose a status line, output style, default model or effort, keybindings, or notification sounds unless the user asks.

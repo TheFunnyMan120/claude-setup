@@ -22,7 +22,10 @@ import sys
 from pathlib import Path
 
 HOME = Path.home()
-USER_CLAUDE = HOME / ".claude"
+# Claude Code moves ~/.claude (and ~/.claude.json into it) when CLAUDE_CONFIG_DIR is set
+_CFG = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+USER_CLAUDE = Path(os.path.expanduser(_CFG)) if _CFG else HOME / ".claude"
+CLAUDE_JSON = USER_CLAUDE / ".claude.json" if _CFG else HOME / ".claude.json"
 SKIP_DIRS = {
     ".git", "node_modules", ".venv", "venv", "env", "__pycache__", "dist",
     "build", ".next", ".nuxt", "target", "out", ".cache", "vendor",
@@ -64,10 +67,92 @@ IGNORED_PATH_TOOLS = ("Write", "NotebookEdit", "Glob", "MultiEdit")
 # ---------------------------------------------------------------- helpers
 
 def read_text(p):
+    """UTF-8 (BOM stripped; Notepad adds one) or UTF-16 (PowerShell 5's `>` writes it)."""
     try:
-        return Path(p).read_text(encoding="utf-8", errors="replace")
+        raw = Path(p).read_bytes()
     except Exception:
         return None
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16", errors="replace")
+    return raw.decode("utf-8-sig", errors="replace")
+
+
+def load_obj(p):
+    """A JSON file's top-level object, or {} if it's missing, invalid, or not an object."""
+    try:
+        d = json.loads(read_text(p) or "{}")
+    except ValueError:
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def sub_obj(d, key):
+    v = d.get(key) if isinstance(d, dict) else None
+    return v if isinstance(v, dict) else {}
+
+
+def is_utf16(p):
+    try:
+        with open(p, "rb") as f:
+            return f.read(2) in (b"\xff\xfe", b"\xfe\xff")
+    except OSError:
+        return False
+
+
+def str_list(x, where, problems):
+    if isinstance(x, str):
+        problems.append(f"{where} is a string, not a list")
+        return [x]
+    if not isinstance(x, list):
+        if x is not None:
+            problems.append(f"{where} is not a list")
+        return []
+    return [v for v in x if isinstance(v, str)]
+
+
+def clean_settings(data):
+    """Coerce a settings.json into the shapes the linter expects; odd shapes become findings."""
+    probs = []
+    if not isinstance(data, dict):
+        return {}, ["top level is not a JSON object"]
+    d = dict(data)
+    perms = d.get("permissions")
+    if perms is not None and not isinstance(perms, dict):
+        probs.append("permissions is not an object")
+        perms = {}
+    perms = dict(perms or {})
+    for k in ("allow", "ask", "deny", "additionalDirectories"):
+        if k in perms:
+            perms[k] = str_list(perms[k], f"permissions.{k}", probs)
+    d["permissions"] = perms
+    if "env" in d and not isinstance(d["env"], dict):
+        probs.append("env is not an object")
+        d["env"] = {}
+    hooks = d.get("hooks")
+    if hooks is not None and not isinstance(hooks, dict):
+        probs.append("hooks is not an object (keyed by event name); Claude Code ignores it")
+        hooks = {}
+    clean_hooks = {}
+    for ev, groups in (hooks or {}).items():
+        if not isinstance(groups, list):
+            probs.append(f"hooks.{ev} is not a list of matcher groups")
+            continue
+        gs = []
+        for g in groups:
+            if not isinstance(g, dict) or not isinstance(g.get("hooks"), list):
+                probs.append(f"hooks.{ev} has a group without a `hooks` list")
+                continue
+            hs = [h for h in g["hooks"] if isinstance(h, dict)]
+            if len(hs) != len(g["hooks"]):
+                probs.append(f"hooks.{ev} has an entry that isn't an object")
+            for h in hs:
+                for k in ("command", "url", "prompt"):
+                    if k in h and not isinstance(h[k], str):
+                        h[k] = ""
+            gs.append(dict(g, hooks=hs))
+        clean_hooks[ev] = gs
+    d["hooks"] = clean_hooks
+    return d, probs
 
 
 def rel(p, base):
@@ -357,7 +442,14 @@ def lint_settings(path, data, project, scope):
                     issues.append("SessionEnd hooks share a ~1.5s budget; long timeout is ineffective unless the script detaches")
                 if event in ("UserPromptSubmit", "PreToolUse") and g.get("matcher") in (None, "", "*") and h.get("type") in ("agent", "prompt"):
                     issues.append("model-backed hook on every call (latency/cost)")
-                script = re.search(r"([\w\-./\\$\"{}~:]+\.(?:sh|py|js|mjs|ps1))", cmd)
+                # quoted paths first: "C:\Users\John Smith\..." has a space the bare pattern stops at
+                script = (re.search(r"\"([^\"]+\.(?:sh|py|js|mjs|ps1))\"", cmd) or re.search(r"'([^']+\.(?:sh|py|js|mjs|ps1))'", cmd)
+                          or re.search(r"([\w\-./\\$\"{}~:]+\.(?:sh|py|js|mjs|ps1))", cmd))
+                exe = re.match(r"\s*[\"']([^\"']+)[\"']", cmd)
+                if exe and not re.search(r"\.(sh|py|js|mjs|ps1)$", exe.group(1)) and re.match(r"^([A-Za-z]:[\\/]|/)", exe.group(1)):
+                    entry["interpreter_exists"] = Path(exe.group(1)).exists()
+                    if not entry["interpreter_exists"]:
+                        issues.append(f"interpreter not found ({exe.group(1)}); was it upgraded or uninstalled?")
                 if script:
                     sp = script.group(1).strip("\"'").replace("$CLAUDE_PROJECT_DIR", str(project)).replace("${CLAUDE_PROJECT_DIR}", str(project)).replace("~", str(HOME))
                     if not Path(sp).is_absolute():
@@ -382,8 +474,21 @@ def lint_settings(path, data, project, scope):
 
 def lint_mcp(path, data, project):
     out = {"path": rel(path, project), "servers": [], "flags": []}
-    for name, cfg in (data.get("mcpServers") or {}).items():
-        cfg = cfg or {}
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    if not isinstance(servers, dict):
+        out["flags"].append("mcpServers is missing or not an object (keyed by server name)")
+        servers = {}
+    for name, cfg in servers.items():
+        if not isinstance(cfg, dict):
+            out["flags"].append(f"server {name!r} is not an object")
+            continue
+        cfg = dict(cfg)
+        if not isinstance(cfg.get("args", []), list):
+            out["flags"].append(f"server {name!r}: args is not a list")
+            cfg["args"] = []
+        for section in ("env", "headers"):
+            if not isinstance(cfg.get(section) or {}, dict):
+                cfg[section] = {}
         s = {"name": name, "type": cfg.get("type") or ("stdio" if "command" in cfg else "?"),
              "command": " ".join([str(cfg.get("command", ""))] + [str(a) for a in cfg.get("args", [])])[:160] or None,
              "url": cfg.get("url"), "issues": []}
@@ -516,7 +621,7 @@ def main():
             if "node_modules" in pj.parts:
                 continue
             try:
-                pkg_scripts |= set((json.loads(read_text(pj)) or {}).get("scripts", {}).keys())
+                pkg_scripts |= set(sub_obj(load_obj(pj), "scripts").keys())
             except Exception:
                 pass
     mk = project / "Makefile"
@@ -655,11 +760,11 @@ def main():
     if not args.no_user:
         enabled = {}
         try:
-            enabled = (json.loads(read_text(USER_CLAUDE / "settings.json") or "{}") or {}).get("enabledPlugins", {}) or {}
+            enabled = sub_obj(load_obj(USER_CLAUDE / "settings.json"), "enabledPlugins")
         except Exception:
             pass
         try:
-            installed = (json.loads(read_text(USER_CLAUDE / "plugins" / "installed_plugins.json") or "{}") or {}).get("plugins", {})
+            installed = sub_obj(load_obj(USER_CLAUDE / "plugins" / "installed_plugins.json"), "plugins")
         except Exception:
             installed = {}
         for key, entries in installed.items():
@@ -680,14 +785,19 @@ def main():
     if not args.no_user:
         settings_files += [(USER_CLAUDE / "settings.json", "user"), (USER_CLAUDE / "settings.local.json", "user-local")]
     for p, scope in settings_files:
-        if p.exists():
+        if p.is_file():
             t = read_text(p) or ""
             report["secrets"].extend(scan_secrets(t, rel(p, project)))
             try:
-                report["settings"].append(lint_settings(p, json.loads(t), project, scope))
+                data, probs = clean_settings(json.loads(t) if t.strip() else {})
+                s = lint_settings(p, data, project, scope)
+                s["flags"] += [{"sev": "medium", "msg": f"settings shape: {m}"} for m in probs]
             except json.JSONDecodeError as e:
-                report["settings"].append({"path": rel(p, project), "scope": scope,
-                                           "flags": [{"sev": "high", "msg": f"invalid JSON: {e}"}]})
+                s = {"path": rel(p, project), "scope": scope,
+                     "flags": [{"sev": "high", "msg": f"invalid JSON (Claude Code ignores the whole file): {e}"}]}
+            if is_utf16(p):
+                s["flags"].append({"sev": "medium", "msg": "file is UTF-16 (PowerShell 5 `>` writes it); re-save as UTF-8"})
+            report["settings"].append(s)
     all_deny = [r for s in report["settings"] for r in s.get("deny_rules", [])]
     unprotected = []
     for ef in report["sensitive_files"]:
@@ -795,30 +905,38 @@ def main():
             budget["mcp_servers"].append({"name": s["name"], "scope": "project (.mcp.json)"})
     if not args.no_user:
         try:
-            gc = json.loads(read_text(HOME / ".claude.json") or "{}")
+            gc = load_obj(CLAUDE_JSON)
         except Exception:
             gc = {}
-        for n in (gc.get("mcpServers") or {}):
+        for n in sub_obj(gc, "mcpServers"):
             budget["mcp_servers"].append({"name": n, "scope": "user (~/.claude.json)"})
-        pkey = next((k for k in (gc.get("projects") or {}) if Path(k).resolve() == project), None)
-        pentry = (gc.get("projects") or {}).get(pkey, {}) if pkey else {}
-        for n in (pentry.get("mcpServers") or {}):
+        projects = sub_obj(gc, "projects")
+
+        def same(k):
+            try:
+                return Path(k).resolve() == project
+            except (OSError, ValueError):
+                return False
+        pkey = next((k for k in projects if same(k)), None)
+        pentry = sub_obj(projects, pkey) if pkey else {}
+        for n in sub_obj(pentry, "mcpServers"):
             budget["mcp_servers"].append({"name": n, "scope": "local (~/.claude.json, this project)"})
-        disabled = (pentry.get("disabledMcpjsonServers") or []) + (pentry.get("disabledMcpServers") or [])
+        disabled = (str_list(pentry.get("disabledMcpjsonServers"), "", []) +
+                    str_list(pentry.get("disabledMcpServers"), "", []))
         if disabled:
             budget["disabled_mcp"] = disabled
         try:
-            enabled = (json.loads(read_text(USER_CLAUDE / "settings.json") or "{}") or {}).get("enabledPlugins", {}) or {}
-            installed = (json.loads(read_text(USER_CLAUDE / "plugins" / "installed_plugins.json") or "{}") or {}).get("plugins", {})
+            enabled = sub_obj(load_obj(USER_CLAUDE / "settings.json"), "enabledPlugins")
+            installed = sub_obj(load_obj(USER_CLAUDE / "plugins" / "installed_plugins.json"), "plugins")
         except Exception:
             enabled, installed = {}, {}
         budget["plugins_enabled"] = sum(1 for v in enabled.values() if v)
         for key, entries in installed.items():
-            if enabled.get(key) is not True:
+            if enabled.get(key) is not True or not isinstance(entries, list):
                 continue
-            for e in (entries or [])[:1]:
+            for e in [x for x in entries if isinstance(x, dict)][:1]:
                 try:
-                    pm = json.loads(read_text(Path(e.get("installPath", "")) / ".mcp.json") or "{}")
+                    pm = load_obj(Path(e.get("installPath", "")) / ".mcp.json")
                 except Exception:
                     pm = {}
                 for n in (pm.get("mcpServers") or pm if isinstance(pm, dict) else {}):

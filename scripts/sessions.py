@@ -56,6 +56,8 @@ def encoded(p):
 def texts_of(content):
     if isinstance(content, str):
         return [content]
+    if not isinstance(content, list):
+        return []
     out = []
     for b in content or []:
         if isinstance(b, dict) and b.get("type") == "text":
@@ -143,6 +145,37 @@ def project_cwd(f):
     return None
 
 
+def project_dirs(project):
+    """This project's transcript folders: its own, plus its .claude/worktrees/* folders.
+    Matching by prefix alone would also pull in siblings (`app` would match `app2`, `app-old`).
+    If the encoded name misses (Claude shortens long paths; non-ASCII may encode differently),
+    fall back to the cwd recorded inside each folder's newest transcript."""
+    base = USER_CLAUDE / "projects"
+    if not base.is_dir():
+        return []
+    enc = encoded(project)
+    wt = enc + "--claude-worktrees-"
+    dirs = [d for d in base.iterdir() if d.is_dir() and (d.name == enc or d.name.startswith(wt))]
+    if any(d.name == enc for d in dirs):
+        return dirs
+    target = str(project).lower()
+    for d in base.iterdir():
+        if not d.is_dir() or d in dirs:
+            continue
+        files = sorted(d.glob("*.jsonl"), key=mtime, reverse=True)
+        cwd = project_cwd(files[0]) if files else None
+        if not cwd:
+            continue
+        c = re.split(r"[\\/]\.claude[\\/]worktrees[\\/]", cwd)[0]
+        try:
+            c = str(Path(c).resolve()).lower()
+        except (OSError, ValueError):
+            c = c.lower()
+        if c == target:
+            dirs.append(d)
+    return dirs
+
+
 def list_projects(days):
     base = USER_CLAUDE / "projects"
     cutoff = time.time() - days * 86400
@@ -185,9 +218,7 @@ def main():
     if a.list_projects:
         return list_projects(a.days)
     project = Path(a.project).resolve()
-    enc = encoded(project)
-    base = USER_CLAUDE / "projects"
-    dirs = [d for d in base.glob(enc + "*") if d.is_dir()] if base.exists() else []
+    dirs = project_dirs(project)
     cutoff = time.time() - a.days * 86400
     files = sorted((f for d in dirs for f in d.glob("*.jsonl") if mtime(f) >= cutoff),
                    key=mtime, reverse=True)[: a.max_sessions]
@@ -211,6 +242,8 @@ def main():
                 d = json.loads(line)
             except Exception:
                 continue
+            if not isinstance(d, dict):
+                continue
             uid = d.get("uuid")
             if uid:
                 if uid in seen_uuids:
@@ -225,7 +258,7 @@ def main():
                 titles.append(d["customTitle"])
             if d.get("isSidechain"):
                 continue
-            msg = d.get("message") or {}
+            msg = d.get("message") if isinstance(d.get("message"), dict) else {}
             content = msg.get("content")
             if t == "user":
                 if isinstance(content, list):
@@ -263,7 +296,8 @@ def main():
                 for b in content if isinstance(content, list) else []:
                     if not isinstance(b, dict) or b.get("type") != "tool_use":
                         continue
-                    name, inp = b.get("name", "?"), b.get("input") or {}
+                    name, inp = str(b.get("name", "?")), b.get("input")
+                    inp = inp if isinstance(inp, dict) else {}
                     tools[name] += 1
                     key = None
                     if name in ("Bash", "PowerShell"):

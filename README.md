@@ -20,7 +20,7 @@ claude plugin marketplace add ./claude-setup
 claude plugin install claude-setup@claude-setup
 ```
 
-Requires Python 3 on your PATH, as `python`, `python3`, or `py`.
+Requires Python 3.8+ on your PATH, as `python`, `python3`, or `py`. If you've moved `~/.claude` with `CLAUDE_CONFIG_DIR`, the scripts follow it.
 
 Or download the zip from the [latest release](https://github.com/TheFunnyMan120/claude-setup/releases/latest), unzip it, and either run `claude plugin marketplace add <unzipped folder>` or copy the folder to `~/.claude/skills/claude-setup` to use it as a plain skill.
 
@@ -64,7 +64,11 @@ If you turn it on, it watches for corrections you give Claude ("don't do X", "fr
 
 Everything runs locally. Session scanning reads only that project's transcripts under `~/.claude/projects/`, only after you say yes. Global mode asks separately for each project. The learning hook only reads what you typed, and only once you've turned it on. It redacts secret-shaped strings and reports aggregate patterns. Secret values are never printed.
 
-## Testing triggers
+## Testing
+
+`python tests/edge_cases.py` runs the scripts through edge cases (odd settings shapes, encodings, malformed transcripts, corrupt suggestion files, unusual installs, races) in a throwaway home folder. It calls no model and doesn't touch your `~/.claude`.
+
+### Triggers
 
 `evals/trigger-prompts.md` lists prompts that should and shouldn't activate the skill. `python evals/run_trigger_eval.py <empty-dir>` runs them through `claude -p` in plan mode, so nothing is written. It needs a logged-in `claude` CLI.
 

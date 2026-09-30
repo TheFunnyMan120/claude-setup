@@ -30,18 +30,22 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
-HOME_CLAUDE = Path.home() / ".claude"
+_CFG = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()  # Claude Code's relocated ~/.claude
+HOME_CLAUDE = Path(os.path.expanduser(_CFG)) if _CFG else Path.home() / ".claude"
 STATE_DIR = HOME_CLAUDE / "claude-setup"
 FILE_REL = Path(".claude") / "setup-suggestions.md"
 STATE_BEGIN, STATE_END = "<!-- claude-setup:state", "-->"
 CHILD_ENV = "CLAUDE_SETUP_LEARN_CHILD"
 HOOK_NAME = "claude-setup-learn.py"
-VERSION = "2.0.3"  # installed copies carry this; inventory.py flags copies older than the skill's
+VERSION = "2.0.4"  # installed copies carry this; inventory.py flags copies older than the skill's
 MODEL = "sonnet"
 IS_CLOUD = os.environ.get("CLAUDE_CODE_REMOTE", "").lower() == "true"
+# the analysis runs detached (no console); without this every git/claude call flashes a window
+NO_WINDOW = {"creationflags": 0x08000000} if os.name == "nt" else {}
 
 CORRECTION_RE = re.compile(
     r"(^\s*(no|nope|nah|stop|wait|wrong|not that|that'?s not)\b|\bdon'?t\b|\bdo not\b|\binstead\b|"
@@ -114,7 +118,10 @@ def norm(s):
 def log(msg):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(STATE_DIR / "learn.log", "a", encoding="utf-8") as f:
+        lf = STATE_DIR / "learn.log"
+        if lf.exists() and lf.stat().st_size > 1_000_000:  # keep one old generation
+            os.replace(lf, STATE_DIR / "learn.log.1")
+        with open(lf, "a", encoding="utf-8") as f:
             f.write(f"{now().isoformat(timespec='seconds')} {msg}\n")
     except OSError:
         pass
@@ -132,7 +139,7 @@ def project_root(cwd):
     cwd = Path(cwd or os.getcwd()).resolve()
     try:
         out = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True,
-                             encoding="utf-8", errors="replace", timeout=10)
+                             encoding="utf-8", errors="replace", timeout=10, **NO_WINDOW)
         if out.returncode == 0 and out.stdout.strip():
             return Path(out.stdout.strip())
     except (OSError, subprocess.SubprocessError):
@@ -147,16 +154,23 @@ def account_tag():
 
 def load_json(p, default):
     try:
-        return json.loads(Path(p).read_text(encoding="utf-8"))
+        return json.loads(Path(p).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return default
 
 
 def write_atomic(p, text):
     p = Path(p)
+    if p.is_symlink():  # dotfile managers symlink settings.json; replacing the link would break that
+        p = p.resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
+    if p.exists():
+        try:
+            shutil.copymode(p, tmp)
+        except OSError:
+            pass
     os.replace(tmp, p)
 
 
@@ -193,11 +207,39 @@ class Lock:
                 pass
 
 
+STATE_FILE = STATE_DIR / "learn-state.json"
+
+
+def read_state():
+    st = load_json(STATE_FILE, {})
+    st = st if isinstance(st, dict) else {}
+    offsets = st.get("offsets") if isinstance(st.get("offsets"), dict) else {}
+    runs = st.get("runs") if isinstance(st.get("runs"), dict) else {}
+    offsets = {k: v for k, v in offsets.items() if isinstance(v, int)}
+    if len(offsets) > 300:  # one entry per transcript ever seen; forget the ones that are gone
+        offsets = {k: v for k, v in offsets.items() if os.path.exists(k)}
+    return {"offsets": offsets,
+            "runs": {d: n for d, n in runs.items() if isinstance(n, int) and d >= today()}}
+
+
+def update_state(fn):
+    """Read-modify-write learn-state.json under its own lock: it's shared by every project,
+    and two sessions ending at once would otherwise drop each other's offsets."""
+    with Lock("learn-state", wait=30) as lk:
+        st = read_state()
+        res = fn(st)
+        if lk is not None:
+            write_atomic(STATE_FILE, json.dumps(st))
+        return res
+
+
 # ---------- prefilter ----------
 
 def texts_of(content):
     if isinstance(content, str):
         return [content]
+    if not isinstance(content, list):
+        return []
     return [b.get("text", "") for b in content or [] if isinstance(b, dict) and b.get("type") == "text"]
 
 
@@ -207,7 +249,7 @@ def strip_pasted(s):
 
 
 def tool_summary(block):
-    inp = block.get("input") or {}
+    inp = block.get("input") if isinstance(block.get("input"), dict) else {}
     detail = inp.get("command") or inp.get("file_path") or inp.get("description") or ""
     return clip(redact(f"{block.get('name')}: {detail}"), 200)
 
@@ -237,9 +279,9 @@ def prefilter(transcript, offset=0):
                 d = json.loads(raw)
             except ValueError:
                 continue
-            if d.get("isSidechain"):
+            if not isinstance(d, dict) or d.get("isSidechain"):
                 continue
-            t, msg = d.get("type"), d.get("message") or {}
+            t, msg = d.get("type"), d.get("message") if isinstance(d.get("message"), dict) else {}
             content = msg.get("content")
             if t == "assistant":
                 for b in content if isinstance(content, list) else []:
@@ -288,14 +330,42 @@ def sugg_path(root):
 
 
 def parse_state(text):
-    i = text.find(STATE_BEGIN)
-    if i < 0:
+    # Anchor on the last marker pair: the block is always at the bottom, and files written before
+    # 2.0.4 could hold a raw "-->" (e.g. a mermaid arrow) inside the JSON.
+    i = text.rfind(STATE_BEGIN + "\n{")
+    j = text.rfind(STATE_END)
+    if i < 0 or j < i:
         return None
-    j = text.find(STATE_END, i + len(STATE_BEGIN))
     try:
-        return json.loads(text[i + len(STATE_BEGIN): j]).get("items", [])
+        data = json.loads(text[i + len(STATE_BEGIN): j])
     except ValueError:
         return None
+    items = data.get("items") if isinstance(data, dict) else None
+    return clean_items(items) if isinstance(items, list) else None
+
+
+ITEM_DEFAULTS = {"file": "", "current": "", "proposed": "", "why": "", "count": 1, "sessions": [],
+                 "evidence": [], "first_seen": "", "last_seen": ""}
+
+
+def clean_items(raw):
+    """Keep items the hook can work with; fill optional fields a hand edit may have dropped."""
+    out = []
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        it = {**ITEM_DEFAULTS, **it}
+        if not (isinstance(it.get("id"), str) and it.get("kind") in LABEL and it.get("status") in RANK
+                and it.get("scope") in ("project", "global") and it.get("strength") in ("strong", "weak")
+                and isinstance(it.get("destination"), str)):
+            continue
+        for k in ("file", "current", "proposed", "why", "first_seen", "last_seen"):
+            it[k] = it[k] if isinstance(it[k], str) else ""
+        for k in ("sessions", "evidence"):
+            it[k] = [x for x in it[k] if isinstance(x, str)] if isinstance(it[k], list) else []
+        it["count"] = it["count"] if isinstance(it["count"], int) else 1
+        out.append(it)
+    return out
 
 
 def conflict_sides(text):
@@ -348,7 +418,7 @@ def load_state(root):
     """Returns (items, repaired). Git conflict markers are merged, not fatal."""
     p = sugg_path(root)
     try:
-        text = p.read_text(encoding="utf-8")
+        text = p.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return [], False
     if "\n<<<<<<< " in "\n" + text:
@@ -361,9 +431,20 @@ def load_state(root):
         return union(good[0], good[1]) if len(good) == 2 else good[0], True
     items = parse_state(text)
     if items is None:
-        log(f"state block unreadable in {p}; starting fresh")
+        backup_unreadable(p, text)
         return [], False
     return items, False
+
+
+def backup_unreadable(p, text):
+    """The next save would overwrite the file (and its rejected-items memory); keep a copy first."""
+    try:
+        dest = STATE_DIR / "unreadable" / f"{hashlib.sha1(str(p).encode()).hexdigest()[:8]}-{int(time.time())}.md"
+        if text.strip():
+            write_atomic(dest, text)
+            log(f"state block unreadable in {p}; starting fresh (old file kept at {dest})")
+    except OSError:
+        log(f"state block unreadable in {p}; starting fresh")
 
 
 def load_items(root):
@@ -414,8 +495,9 @@ def save_items(root, items):
     done = {s: sum(1 for i in items if i["status"] == s) for s in ("applied", "rejected", "resolved")}
     out += [f"Applied {done['applied']} · Rejected {done['rejected']} (remembered so they don't "
             f"come back) · Already in place {done['resolved']}", ""]
-    out += [STATE_BEGIN, json.dumps({"version": 1, "items": items}, indent=1, ensure_ascii=False),
-            STATE_END, ""]
+    # < and > escaped so item text can never close the comment ("-->") or look like a marker
+    state = json.dumps({"version": 1, "items": items}, indent=1, ensure_ascii=False)
+    out += [STATE_BEGIN, state.replace("<", "\\u003c").replace(">", "\\u003e"), STATE_END, ""]
     p = sugg_path(root)
     new = not p.exists()
     write_atomic(p, "\n".join(out))
@@ -426,11 +508,12 @@ def save_items(root, items):
 def exclude_locally(root):
     """Keep the file out of git locally without touching the repo's .gitignore."""
     try:
-        chk = subprocess.run(["git", "check-ignore", "-q", str(FILE_REL)], cwd=root, timeout=10)
+        chk = subprocess.run(["git", "check-ignore", "-q", FILE_REL.as_posix()], cwd=root, timeout=10,
+                             capture_output=True, **NO_WINDOW)
         if chk.returncode == 0:
             return
         gd = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=root,
-                            capture_output=True, encoding="utf-8", errors="replace", timeout=10)
+                            capture_output=True, encoding="utf-8", errors="replace", timeout=10, **NO_WINDOW)
         if gd.returncode != 0:
             return
         ex = Path(root) / gd.stdout.strip()
@@ -560,11 +643,14 @@ def valid(pr):
 # ---------- model call ----------
 
 def setup_context(root):
-    parts = []
+    parts, seen = [], set()
     for p in (HOME_CLAUDE / "CLAUDE.md", Path(root) / "CLAUDE.md", Path(root) / ".claude" / "CLAUDE.md"):
-        if p.is_file():
-            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()[:250]
-            label = "~/.claude/CLAUDE.md (global)" if p.parent == HOME_CLAUDE else str(p.relative_to(root))
+        key = os.path.normcase(os.path.abspath(p))
+        if p.is_file() and key not in seen:  # run from ~, the project's .claude/CLAUDE.md IS the global one
+            seen.add(key)
+            lines = p.read_text(encoding="utf-8-sig", errors="replace").splitlines()[:250]
+            label = ("~/.claude/CLAUDE.md (global)" if key == os.path.normcase(os.path.abspath(HOME_CLAUDE / "CLAUDE.md"))
+                     else os.path.relpath(p, root))
             parts.append(f"--- {label}\n" + "\n".join(f"{n + 1}: {l}" for n, l in enumerate(lines)))
     return "\n\n".join(parts) or "(no CLAUDE.md files)"
 
@@ -581,15 +667,43 @@ def build_prompt(root, items, signals):
 
 
 def claude_exe():
+    """The claude CLI as an argv prefix, or None."""
     exe = shutil.which("claude")
+    if not exe:
+        # GUI-launched apps (macOS especially) can hand hooks a minimal PATH
+        home = Path.home()
+        for c in (home / ".local" / "bin" / "claude", home / ".claude" / "local" / "claude",
+                  home / ".local" / "bin" / "claude.exe", Path("/opt/homebrew/bin/claude"),
+                  Path("/usr/local/bin/claude")):
+            if c.is_file():
+                exe = str(c)
+                break
     # npm's claude.cmd forwards args through cmd.exe, which cuts the multi-line system prompt at the
-    # first newline and mangles the schema's quotes; call the binary it wraps instead
+    # first newline and mangles the schema's quotes; call what it wraps instead
     if exe and os.name == "nt" and Path(exe).suffix.lower() in (".cmd", ".bat"):
-        real = Path(exe).parent / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
-        if real.exists():
-            return str(real)
-        log(f"only found {Path(exe).name}; multi-line arguments may not survive cmd.exe")
-    return exe
+        return unwrap_cmd_shim(Path(exe)) or log(f"can't see past {Path(exe).name}; multi-line arguments "
+                                                  "won't survive cmd.exe") or [exe]
+    return [exe] if exe else None
+
+
+def unwrap_cmd_shim(shim):
+    d = shim.parent
+    real = d / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+    if real.is_file():
+        return [str(real)]
+    try:  # other npm/pnpm/yarn shim layouts: read the target out of the .cmd
+        text = shim.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for m in re.finditer(r'"%~?dp0%?\\?([^"%]+\.(?:exe|js|cjs|mjs))"', text):
+        target = d / m.group(1).lstrip("\\")
+        if not target.is_file():
+            continue
+        if target.suffix == ".exe":
+            return [str(target)]
+        node = d / "node.exe" if (d / "node.exe").is_file() else shutil.which("node")
+        return [str(node), str(target)] if node else None
+    return None
 
 
 def call_model(prompt, budget):
@@ -598,20 +712,25 @@ def call_model(prompt, budget):
         log("claude CLI not on PATH; skipped")
         return None
     env = dict(os.environ, **{CHILD_ENV: "1"})
-    # Isolated: cwd is STATE_DIR (no project settings), so "project" skips the user's plugins, MCP
-    # servers and hooks. Without this a loaded setup costs ~$0.25 a run and trips --max-budget-usd.
-    cmd = [exe, "-p", "--model", MODEL, "--output-format", "json", "--json-schema", json.dumps(SCHEMA),
+    # Isolated: the cwd has no project settings, so "project" skips the user's plugins, MCP servers
+    # and hooks. Without this a loaded setup costs ~$0.25 a run and trips --max-budget-usd.
+    cmd = [*exe, "-p", "--model", MODEL, "--output-format", "json", "--json-schema", json.dumps(SCHEMA),
            "--no-session-persistence", "--tools", "", "--system-prompt", SYSTEM_PROMPT,
            "--max-budget-usd", str(budget), "--setting-sources", "project",
            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands"]
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    # a neutral cwd: STATE_DIR sits under ~, and a home folder that's a git repo (dotfiles) or holds
+    # a CLAUDE.md would pull that project's settings and memory back into the isolated call
+    work = Path(tempfile.gettempdir()) / "claude-setup-learn"
+    work.mkdir(parents=True, exist_ok=True)
     r = None
     try:
         # explicit utf-8: Windows defaults to the ANSI code page, and a non-ASCII character in
         # CLAUDE.md made the stdin write fail silently, so claude got no prompt
         r = subprocess.run(cmd, input=prompt, capture_output=True, encoding="utf-8", errors="replace",
-                           timeout=300, env=env, cwd=STATE_DIR)
+                           timeout=300, env=env, cwd=work, **NO_WINDOW)
         out = json.loads(r.stdout)
+        if not isinstance(out, dict):
+            raise ValueError("not a JSON object")
     except (OSError, subprocess.SubprocessError, ValueError) as e:
         detail = clip(redact(r.stderr), 200) if r is not None and r.stderr else ""
         log(f"model call failed: {type(e).__name__}" + (f" (stderr: {detail})" if detail else ""))
@@ -635,28 +754,25 @@ def cmd_analyze(a):
         if lk is None:
             log(f"{root.name}: busy, skipped this pass")
             return 0
-        state_p = STATE_DIR / "learn-state.json"
-        state = load_json(state_p, {"offsets": {}, "runs": {}})
         key = str(Path(a.transcript).resolve())
-        signals, new_off = prefilter(a.transcript, state["offsets"].get(key, 0))
-        state["runs"] = {d: n for d, n in state.get("runs", {}).items() if d >= today()}
+        signals, new_off = prefilter(a.transcript, read_state()["offsets"].get(key, 0))
         if not signals:
-            state["offsets"][key] = new_off
-            write_atomic(state_p, json.dumps(state))
+            update_state(lambda st: st["offsets"].__setitem__(key, new_off))
             return 0
-        if state["runs"].get(today(), 0) >= a.daily_cap:
+
+        def take_run(st):
+            if st["runs"].get(today(), 0) >= a.daily_cap:
+                return False
+            st["runs"][today()] = st["runs"].get(today(), 0) + 1  # a failed call still costs
+            return True
+        if not update_state(take_run):
             log(f"daily cap {a.daily_cap} reached; {len(signals)} signal(s) kept for a later run")
-            write_atomic(state_p, json.dumps(state))
             return 0
-        # a failed call still costs, so it counts toward the cap
-        state["runs"][today()] = state["runs"].get(today(), 0) + 1
-        write_atomic(state_p, json.dumps(state))
         items, repaired = load_state(root)
         proposals = call_model(build_prompt(root, items, signals), a.budget)
         if proposals is None:
             return 0  # offset not advanced: these signals are retried next time
-        state["offsets"][key] = new_off
-        write_atomic(state_p, json.dumps(state))
+        update_state(lambda st: st["offsets"].__setitem__(key, new_off))
         added = merge(items, proposals, a.session or Path(a.transcript).stem, root)
         reconcile(root, items, a.expire_days)
         if proposals or repaired or sugg_path(root).exists():
@@ -689,21 +805,28 @@ def cmd_session_end(a):
             "--expire-days", str(a.expire_days), "--daily-cap", str(a.daily_cap), "--budget", str(a.budget)]
     kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
           "env": dict(os.environ, **{CHILD_ENV: ""})}
-    if os.name == "nt":
-        kw["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    else:
+    if os.name != "nt":
         kw["start_new_session"] = True
-    try:
-        subprocess.Popen(args, **kw)  # outlives the ~1.5-3.5 s SessionEnd window
-    except OSError as e:
-        log(f"could not start background analysis: {e}")
+    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, plus CREATE_BREAKAWAY_FROM_JOB so a job-object
+    # tree kill at the end of the SessionEnd window doesn't take the child with it (if the job
+    # forbids breakaway, CreateProcess refuses and the plain flags are used)
+    flag_sets = [0x00000008 | 0x00000200 | 0x01000000, 0x00000008 | 0x00000200] if os.name == "nt" else [None]
+    for flags in flag_sets:
+        if flags is not None:
+            kw["creationflags"] = flags
+        try:
+            subprocess.Popen(args, **kw)  # outlives the ~1.5-3.5 s SessionEnd window
+            return 0
+        except OSError as e:
+            err = e
+    log(f"could not start background analysis: {err}")
     return 0
 
 
 def dirty(root):
     try:
-        r = subprocess.run(["git", "status", "--porcelain", "--", str(FILE_REL)], cwd=root,
-                           capture_output=True, encoding="utf-8", errors="replace", timeout=10)
+        r = subprocess.run(["git", "status", "--porcelain", "--", FILE_REL.as_posix()], cwd=root,
+                           capture_output=True, encoding="utf-8", errors="replace", timeout=10, **NO_WINDOW)
         return bool(r.stdout.strip())
     except (OSError, subprocess.SubprocessError):
         return False
@@ -820,11 +943,25 @@ def option_args(a, existing):
     return "".join(f" --{k} {v}" for k, v in sorted(opts.items()))
 
 
+def stable_python():
+    """The interpreter the hook command should use. A virtualenv's python breaks the hook the day
+    the venv is deleted, so use the base install it was made from."""
+    if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        cands = [getattr(sys, "_base_executable", ""),
+                 os.path.join(sys.base_prefix, "python.exe"),
+                 os.path.join(sys.base_prefix, "bin", "python3"),
+                 os.path.join(sys.base_prefix, "bin", "python")]
+        for c in cands:
+            if c and os.path.isfile(c) and not os.path.abspath(c).startswith(os.path.abspath(sys.prefix)):
+                return c
+    return sys.executable
+
+
 def cmd_install(a, remove=False):
     root = project_root(a.cwd)
     if a.scope == "user":
         settings_p, script_p = HOME_CLAUDE / "settings.json", HOME_CLAUDE / "hooks" / HOOK_NAME
-        run = f'"{sys.executable}" "{script_p}"'
+        run = f'"{stable_python()}" "{script_p}"'
         events = {"SessionStart": f"{run} session-start", "SessionEnd": f"{run} session-end"}
     else:
         settings_p, script_p = root / ".claude" / "settings.json", root / ".claude" / "hooks" / HOOK_NAME
@@ -836,20 +973,37 @@ def cmd_install(a, remove=False):
         run = f'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/{HOOK_NAME}"'
         events = {"SessionStart": f"{run} session-start --only-account {tag}",
                   "Stop": f"{run} stop --only-account {tag}"}
-    settings = load_json(settings_p, None) if settings_p.exists() else {}
-    if not isinstance(settings, dict):
-        print(f"{settings_p} is not valid JSON; not touching it", file=sys.stderr)
+    if settings_p.is_dir():
+        print(f"{settings_p} is a directory; not touching it", file=sys.stderr)
+        return 1
+    text = settings_p.read_text(encoding="utf-8-sig") if settings_p.is_file() else ""
+    try:
+        settings = json.loads(text) if text.strip() else {}
+    except ValueError as e:
+        print(f"{settings_p} is not valid JSON ({e}); fix it first, not touching it", file=sys.stderr)
+        return 1
+    if not isinstance(settings, dict) or not isinstance(settings.get("hooks", {}), dict):
+        print(f"{settings_p}: the top level or its `hooks` isn't an object; fix it first, not touching it",
+              file=sys.stderr)
         return 1
     hooks = settings.setdefault("hooks", {})
-    existing = " ".join(h.get("command", "") for gs in hooks.values() for g in gs
-                        for h in g.get("hooks", []) if HOOK_NAME in h.get("command", ""))
+    bad = [ev for ev in events if ev in hooks and not isinstance(hooks[ev], list)]
+    if bad:
+        print(f"{settings_p}: hooks.{bad[0]} isn't a list; fix it first, not touching it", file=sys.stderr)
+        return 1
+
+    def ours(g):  # anything that isn't a well-formed group is someone else's and stays as it is
+        return isinstance(g, dict) and isinstance(g.get("hooks"), list) and any(
+            isinstance(h, dict) and HOOK_NAME in str(h.get("command", "")) for h in g["hooks"])
+    existing = " ".join(str(h.get("command", "")) for gs in hooks.values() if isinstance(gs, list)
+                        for g in gs if ours(g) for h in g["hooks"] if isinstance(h, dict))
     opts = option_args(a, existing)
     events = {ev: cmd + opts for ev, cmd in events.items()}
     for ev in list(hooks):
-        hooks[ev] = [g for g in hooks[ev] if not any(HOOK_NAME in h.get("command", "")
-                                                     for h in g.get("hooks", []))]
-        if not hooks[ev]:
-            del hooks[ev]
+        if isinstance(hooks[ev], list) and any(ours(g) for g in hooks[ev]):
+            hooks[ev] = [g for g in hooks[ev] if not ours(g)]
+            if not hooks[ev]:
+                del hooks[ev]
     if not remove:
         for ev, cmd in events.items():
             hooks.setdefault(ev, []).append(hook_entry(ev, cmd))
@@ -859,7 +1013,7 @@ def cmd_install(a, remove=False):
         script_p.unlink()
     if not hooks:
         settings.pop("hooks", None)
-    write_atomic(settings_p, json.dumps(settings, indent=2) + "\n")
+    write_atomic(settings_p, json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
     json.loads(settings_p.read_text(encoding="utf-8"))
     print(json.dumps({"settings": str(settings_p), "script": str(script_p), "version": VERSION,
                       "events": [] if remove else list(events), "options": opts.strip()}))
@@ -897,9 +1051,15 @@ def main():
           "install": cmd_install, "uninstall": lambda x: cmd_install(x, remove=True)}[a.cmd]
     try:
         return fn(a)
-    except Exception as e:  # a hook must never break the session
+    except Exception as e:
         log(f"{a.cmd} error: {type(e).__name__}: {e}")
-        return 0
+        if a.cmd in HOOK_CMDS:
+            return 0  # a hook must never break the session
+        print(f"learn.py {a.cmd} failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+
+
+HOOK_CMDS = ("session-start", "session-end", "stop", "analyze")
 
 
 if __name__ == "__main__":
