@@ -25,7 +25,7 @@ An optional hook that turns corrections from sessions into setup suggestions the
 
 | | Local | Cloud |
 |---|---|---|
-| When | SessionEnd hands off to a detached background process (the hook returns as soon as Python has started: ~0.05 s on Linux or macOS, ~0.5 s on Windows) | Stop, at the end of a turn, only when there's something new (containers are reclaimed without warning) |
+| When | SessionEnd hands off to a detached background process (the hook returns as soon as Python has started: under 0.1 s on Linux, ~0.5 s on Windows) | Stop, at the end of a turn, only when there's something new (containers are reclaimed without warning) |
 | Installed in | `~/.claude/settings.json` (all repos) | the repo's `.claude/settings.json`, committed |
 | Suggestions file | Kept out of git via `.git/info/exclude` (the repo's `.gitignore` is untouched) | Committed: the hook asks Claude to commit and push it on the current branch |
 | Runs for | You | Only your account (`--only-account` tag), and only in cloud sessions |
