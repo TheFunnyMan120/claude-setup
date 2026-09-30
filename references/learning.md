@@ -7,6 +7,7 @@ An optional hook that turns corrections from sessions into setup suggestions the
 - [Turning it on](#turning-it-on)
 - [Review](#review)
 - [Turning it off](#turning-it-off)
+- [How files stay in sync](#how-files-stay-in-sync)
 - [Facts it relies on](#facts-it-relies-on)
 
 ## How it works
@@ -41,7 +42,7 @@ Then:
 - Local: `python "${CLAUDE_SKILL_DIR}/scripts/learn.py" install --scope user`
 - Cloud (per repo): `python3 "${CLAUDE_SKILL_DIR}/scripts/learn.py" install --scope project`, then commit `.claude/settings.json` and `.claude/hooks/claude-setup-learn.py`.
 
-Options go on the installed hook commands: `--expire-days N`, `--daily-cap N`, `--budget USD`. Settings changes need a restart (or `/hooks` review) to take effect.
+Options (`--expire-days N`, `--daily-cap N`, `--budget USD`) are passed to `install` and written into the hook commands. Reinstalling keeps them unless new values are given. Settings changes need a restart (or `/hooks` review) to take effect.
 
 ## Review
 
@@ -56,6 +57,18 @@ Options go on the installed hook commands: `--expire-days N`, `--daily-cap N`, `
 ## Turning it off
 
 `learn.py uninstall --scope user|project` removes only its own hook entries and the copied script, keeping every other setting. It leaves the suggestions file in place; offer to delete it.
+
+## How files stay in sync
+
+Each repo has its own `.claude/setup-suggestions.md`. Nothing copies between repos. Each file catches up whenever it's touched:
+- **Reconcile** runs at session start, on every hook write, and at the start of review. An item is marked done when its target already reflects it:
+  - CLAUDE.md items: the proposed line is present, or for a remove, the line is gone.
+  - Permission items: every rule in the proposal (e.g. `Bash(npm test:*)`) is in the matching `settings.json` allow, ask, or deny list.
+  - Hook, skill, and rule items only close through review.
+- **Global mode** marks applied Global items done in every chosen repo.
+- **Git merge conflicts** in this file (two cloud branches both updated it) are merged by the script, not by hand. Every read unions both sides by ID: the furthest-along status wins (rejected > applied > resolved > pending > watching), counts and sessions combine, and a weak item seen on both branches becomes pending. The next hook run, `learn.py reconcile`, or `/claude-setup review` writes the clean file; then commit it. Don't hand-pick a side, since that can bring back rejected items.
+- **Local copy of a cloud-committed file:** once the cloud has committed the file, git tracks it, and `.git/info/exclude` no longer hides it. Local runs then show it as modified in `git status`. That's expected, and it's how local review results get back to the cloud. Commit it with normal work, or leave it.
+- **Installed hook copies** carry a `VERSION`. `inventory.py` reports `learning_hook.installed[].outdated` when a copy is older than the skill. Offer to reinstall at the same scope; `install` keeps the options from the previous install.
 
 ## Facts it relies on
 

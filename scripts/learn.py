@@ -39,6 +39,7 @@ FILE_REL = Path(".claude") / "setup-suggestions.md"
 STATE_BEGIN, STATE_END = "<!-- claude-setup:state", "-->"
 CHILD_ENV = "CLAUDE_SETUP_LEARN_CHILD"
 HOOK_NAME = "claude-setup-learn.py"
+VERSION = "2.0.0"  # installed copies carry this; inventory.py flags copies older than the skill's
 MODEL = "sonnet"
 IS_CLOUD = os.environ.get("CLAUDE_CODE_REMOTE", "").lower() == "true"
 
@@ -68,6 +69,7 @@ Most excerpts are NOT setup material. Return an empty list unless something clea
 - proposed: the exact line to write, short, imperative, specific. Not a paraphrase of the conversation.
 - evidence: a short paraphrase of what happened, no long quotes, no secrets, no personal data.
 - same_as: if an item under OPEN SUGGESTIONS already covers this, put its id; otherwise "". Never re-propose anything under REJECTED.
+- For permission items, put the exact rule in `proposed`, e.g. "allow Bash(npm test:*)" or "deny Read(./.env)".
 - Do not restate what Claude does by default."""
 
 SCHEMA = {"type": "object", "additionalProperties": False, "required": ["items"], "properties": {"items": {
@@ -285,21 +287,87 @@ def sugg_path(root):
     return Path(root) / FILE_REL
 
 
-def load_items(root):
+def parse_state(text):
+    i = text.find(STATE_BEGIN)
+    if i < 0:
+        return None
+    j = text.find(STATE_END, i + len(STATE_BEGIN))
+    try:
+        return json.loads(text[i + len(STATE_BEGIN): j]).get("items", [])
+    except ValueError:
+        return None
+
+
+def conflict_sides(text):
+    """Split a file with git conflict markers into its two whole-file versions."""
+    ours, theirs, side = [], [], None
+    for line in text.splitlines():
+        if line.startswith("<<<<<<< "):
+            side = "ours"
+        elif line.startswith("||||||| ") and side:
+            side = "base"
+        elif line == "=======" and side:
+            side = "theirs"
+        elif line.startswith(">>>>>>> ") and side:
+            side = None
+        elif side is None:
+            ours.append(line)
+            theirs.append(line)
+        elif side == "ours":
+            ours.append(line)
+        elif side == "theirs":
+            theirs.append(line)
+    return "\n".join(ours), "\n".join(theirs)
+
+
+RANK = {"watching": 0, "pending": 1, "resolved": 2, "applied": 3, "rejected": 4}
+
+
+def union(a, b):
+    """Combine two histories of the same suggestions, e.g. from two branches."""
+    by_id = {i["id"]: dict(i) for i in a}
+    for it in b:
+        cur = by_id.get(it["id"])
+        if not cur:
+            by_id[it["id"]] = dict(it)
+            continue
+        cur["status"] = max(cur["status"], it["status"], key=lambda s: RANK.get(s, 0))
+        cur["count"] = max(cur["count"], it["count"])
+        cur["sessions"] = list(dict.fromkeys(cur["sessions"] + it["sessions"]))[-20:]
+        cur["evidence"] = list(dict.fromkeys(cur["evidence"] + it["evidence"]))[-3:]
+        cur["first_seen"] = min(cur["first_seen"], it["first_seen"])
+        cur["last_seen"] = max(cur["last_seen"], it["last_seen"])
+        if "strong" in (cur["strength"], it["strength"]):
+            cur["strength"] = "strong"
+        if cur["status"] == "watching" and (cur["strength"] == "strong" or len(cur["sessions"]) >= 2):
+            cur["status"] = "pending"
+    return list(by_id.values())
+
+
+def load_state(root):
+    """Returns (items, repaired). Git conflict markers are merged, not fatal."""
     p = sugg_path(root)
     try:
         text = p.read_text(encoding="utf-8")
     except OSError:
-        return []
-    i = text.find(STATE_BEGIN)
-    if i < 0:
-        return []
-    j = text.find(STATE_END, i)
-    try:
-        return json.loads(text[i + len(STATE_BEGIN): j]).get("items", [])
-    except ValueError:
+        return [], False
+    if "\n<<<<<<< " in "\n" + text:
+        sides = [parse_state(t) for t in conflict_sides(text)]
+        good = [x for x in sides if x is not None]
+        if not good:
+            log(f"conflicted state in {p} unreadable on both sides; left as is")
+            return [], False
+        log(f"merged a git conflict in {p}")
+        return union(good[0], good[1]) if len(good) == 2 else good[0], True
+    items = parse_state(text)
+    if items is None:
         log(f"state block unreadable in {p}; starting fresh")
-        return []
+        return [], False
+    return items, False
+
+
+def load_items(root):
+    return load_state(root)[0]
 
 
 LABEL = {"add": "Add", "change": "Change", "remove": "Remove", "conflict": "Conflict"}
@@ -327,7 +395,8 @@ def save_items(root, items):
     out = ["# Claude setup suggestions", "",
            "Written by the claude-setup learning hook. Nothing here is applied until you approve it "
            "with `/claude-setup review`. Edit by running the review, not by hand: the state block at "
-           "the bottom is what the hook reads.", ""]
+           "the bottom is what the hook reads. If git reports a merge conflict here, keep both sides "
+           "(or leave the markers): the next hook run or `/claude-setup review` merges them.", ""]
     if IS_CLOUD:
         out += ["_Cloud session: this file is committed so it survives the container. Global items "
                 "stay pending until you review them in a local session._", ""]
@@ -386,11 +455,31 @@ def target_file(root, it):
     return None
 
 
+RULE_RE = re.compile(r"\b(?:Bash|Read|Edit|Write|WebFetch|WebSearch|Glob|Grep|NotebookEdit|mcp__[\w-]+)(?:\([^)]*\))?")
+
+
+def permission_done(root, it):
+    rules = RULE_RE.findall(it.get("proposed") or "")
+    if not rules:
+        return False
+    files = ([HOME_CLAUDE / "settings.json"] if it["scope"] == "global"
+             else [Path(root) / ".claude" / "settings.json", Path(root) / ".claude" / "settings.local.json"])
+    have = set()
+    for f in files:
+        perms = (load_json(f, {}) or {}).get("permissions") or {}
+        for k in ("allow", "ask", "deny"):
+            have.update(perms.get(k) or [])
+    return bool(have) and all(r in have for r in rules)
+
+
 def reconcile(root, items, expire_days=30):
     """Mark items already reflected in the current files; drop stale weak ones."""
     changed = False
     for it in items:
         if it["status"] not in ("pending", "watching"):
+            continue
+        if it["destination"] == "permission" and permission_done(root, it):
+            it["status"], changed = "resolved", True
             continue
         tf = target_file(root, it)
         if not tf or not tf.is_file():
@@ -542,13 +631,13 @@ def cmd_analyze(a):
             return 0
         state["runs"][today()] = state["runs"].get(today(), 0) + 1
         write_atomic(state_p, json.dumps(state))
-        items = load_items(root)
+        items, repaired = load_state(root)
         proposals = call_model(build_prompt(root, items, signals), a.budget)
         if proposals is None:
             return 0
         added = merge(items, proposals, a.session or Path(a.transcript).stem, root)
         reconcile(root, items, a.expire_days)
-        if proposals or sugg_path(root).exists():
+        if proposals or repaired or sugg_path(root).exists():
             save_items(root, items)
         log(f"{root.name}: {len(signals)} signal(s), {len(proposals)} proposal(s), {added} new")
     return 0
@@ -597,8 +686,11 @@ def cmd_stop(a):
     if os.environ.get(CHILD_ENV) or not IS_CLOUD or not only_account_ok(a) or not hook_input_ok(d):
         return 0
     a.transcript, a.cwd, a.session = d["transcript_path"], d.get("cwd"), str(d.get("session_id") or "")
-    cmd_analyze(a)
     root = project_root(a.cwd)
+    items, repaired = load_state(root)
+    if repaired:
+        save_items(root, items)
+    cmd_analyze(a)
     if sugg_path(root).exists() and dirty(root) and not d.get("stop_hook_active"):
         print(f"claude-setup learning hook: {FILE_REL.as_posix()} was updated. Commit it on the "
               "current branch and push, the same way you push your other work (no new branch). Then "
@@ -613,8 +705,8 @@ def cmd_session_start(a):
     if os.environ.get(CHILD_ENV) or not only_account_ok(a):
         return 0
     root = project_root(d.get("cwd") or a.cwd)
-    items = load_items(root)
-    if items and reconcile(root, items, a.expire_days):
+    items, repaired = load_state(root)
+    if items and (reconcile(root, items, a.expire_days) or repaired):
         save_items(root, items)
     n = sum(1 for i in items if i["status"] == "pending")
     if n:
@@ -631,7 +723,7 @@ def cmd_status(a):
     items = load_items(root)
     counts = {s: sum(1 for i in items if i["status"] == s)
               for s in ("pending", "watching", "applied", "rejected", "resolved")}
-    print(json.dumps({"file": str(sugg_path(root)), "cloud": IS_CLOUD, "counts": counts,
+    print(json.dumps({"file": str(sugg_path(root)), "version": VERSION, "cloud": IS_CLOUD, "counts": counts,
                       "open": [i for i in items if i["status"] in ("pending", "watching")]},
                      indent=1, ensure_ascii=False))
     return 0
@@ -639,8 +731,8 @@ def cmd_status(a):
 
 def cmd_reconcile(a):
     root = project_root(a.cwd)
-    items = load_items(root)
-    if reconcile(root, items, a.expire_days):
+    items, repaired = load_state(root)
+    if reconcile(root, items, a.expire_days) or repaired:
         save_items(root, items)
     return cmd_status(a)
 
@@ -681,7 +773,23 @@ def cmd_prefilter(a):
 
 
 def hook_entry(event, cmd):
-    return {"hooks": [{"type": "command", "command": cmd, "timeout": 300 if event == "Stop" else 30}]}
+    h = {"type": "command", "command": cmd}
+    if event != "SessionEnd":  # SessionEnd has a ~1.5-3.5 s budget regardless; the script detaches
+        h["timeout"] = 300 if event == "Stop" else 30
+    return {"hooks": [h]}
+
+
+OPTION_RE = re.compile(r"--(expire-days|daily-cap|budget) (\S+)")
+
+
+def option_args(a, existing):
+    """Options given now win; otherwise keep what the previous install had."""
+    opts = dict(OPTION_RE.findall(existing))
+    for flag, val, default in (("expire-days", a.expire_days, 30), ("daily-cap", a.daily_cap, 10),
+                               ("budget", a.budget, 0.25)):
+        if val != default:
+            opts[flag] = str(val)
+    return "".join(f" --{k} {v}" for k, v in sorted(opts.items()))
 
 
 def cmd_install(a, remove=False):
@@ -700,11 +808,15 @@ def cmd_install(a, remove=False):
         run = f'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/{HOOK_NAME}"'
         events = {"SessionStart": f"{run} session-start --only-account {tag}",
                   "Stop": f"{run} stop --only-account {tag}"}
-    settings = load_json(settings_p, {}) if settings_p.exists() else {}
-    if settings_p.exists() and not isinstance(settings, dict):
+    settings = load_json(settings_p, None) if settings_p.exists() else {}
+    if not isinstance(settings, dict):
         print(f"{settings_p} is not valid JSON; not touching it", file=sys.stderr)
         return 1
     hooks = settings.setdefault("hooks", {})
+    existing = " ".join(h.get("command", "") for gs in hooks.values() for g in gs
+                        for h in g.get("hooks", []) if HOOK_NAME in h.get("command", ""))
+    opts = option_args(a, existing)
+    events = {ev: cmd + opts for ev, cmd in events.items()}
     for ev in list(hooks):
         hooks[ev] = [g for g in hooks[ev] if not any(HOOK_NAME in h.get("command", "")
                                                      for h in g.get("hooks", []))]
@@ -721,8 +833,8 @@ def cmd_install(a, remove=False):
         settings.pop("hooks", None)
     write_atomic(settings_p, json.dumps(settings, indent=2) + "\n")
     json.loads(settings_p.read_text(encoding="utf-8"))
-    print(json.dumps({"settings": str(settings_p), "script": str(script_p),
-                      "events": [] if remove else list(events)}))
+    print(json.dumps({"settings": str(settings_p), "script": str(script_p), "version": VERSION,
+                      "events": [] if remove else list(events), "options": opts.strip()}))
     return 0
 
 

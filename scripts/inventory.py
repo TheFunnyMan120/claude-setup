@@ -821,6 +821,28 @@ def main():
                       "own context or `/mcp`. `/context` gives exact per-category token use.")
     report["context_budget"] = budget
 
+    # opt-in learning hook: installed copies drift from the skill when the plugin updates
+    def learn_version(path):
+        m = re.search(r'^VERSION = "([^"]+)"', read_text(path) or "", re.M)
+        return m.group(1) if m else "unknown (pre-2.0)"
+    current = learn_version(Path(__file__).parent / "learn.py")
+    copies = [("project", Path(project) / ".claude" / "hooks" / "claude-setup-learn.py")]
+    if not args.no_user:
+        copies.insert(0, ("user", USER_CLAUDE / "hooks" / "claude-setup-learn.py"))
+    lh = {"skill_version": current, "installed": []}
+    for scope, path in copies:
+        if path.exists():
+            v = learn_version(path)
+            lh["installed"].append({"scope": scope, "path": str(path), "version": v,
+                                    "outdated": v != current})
+    sf = Path(project) / ".claude" / "setup-suggestions.md"
+    if sf.exists():
+        text = read_text(sf) or ""
+        lh["suggestions_file"] = str(sf)
+        lh["suggestions_conflicted"] = "\n<<<<<<< " in "\n" + text
+    if lh["installed"] or sf.exists():
+        report["learning_hook"] = lh
+
     json.dump(report, sys.stdout, indent=1 if not args.json else None, default=str, ensure_ascii=False)
     print()
 

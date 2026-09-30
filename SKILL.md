@@ -108,6 +108,7 @@ Learned from real runs:
 - **Bloat usually comes from MCP servers and plugins, not CLAUDE.md.** Check `context_budget` against `mcp_servers_used` from the session scan. Recommend "disable here" for servers unused in this project, not uninstalling everywhere.
 - **Account and org skills aren't on disk.** To find duplicates, compare against the skill list in your own context, not just `~/.claude/skills`.
 - **Windows:** `python3` is often a Store stub, so use `python` or `py`. Paths with spaces break unquoted hooks.
+- **Learning hook upkeep:** if the inventory shows `learning_hook.installed[].outdated`, offer to reinstall at that scope (options are kept). If `suggestions_conflicted` is true, run `learn.py reconcile` to merge the conflict; never hand-pick a side.
 - **Never install the learning hook unasked,** and never as a side effect of fix or init. At most, mention it once in a report when sessions show the same correction recurring.
 - **Leave Anthropic's defaults alone.** Don't propose a status line, output style, default model or effort, keybindings, or notification sounds unless the user asks.
 - **Don't out-write the model.** Setup advice that restates what Claude does by default is noise. Recommend only what changes its behavior in this repo.

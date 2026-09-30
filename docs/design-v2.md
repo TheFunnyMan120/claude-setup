@@ -133,6 +133,12 @@ Every repo carries a Global section, so without syncing they go stale. For examp
 
 Items get a stable ID (a hash of the normalized text plus the destination), so the same suggestion is recognized across repos.
 
+Added after review:
+- **Merge conflicts.** Two cloud branches that both update the file conflict when merged. Every read of the file splits the conflict markers into both versions and unions them by ID (the furthest-along status wins), so the next hook run, `reconcile`, or review writes a clean file. Tested with a real `git merge`: both branches' items were kept, a rejection on one branch survived, and a weak item seen on both became pending.
+- **Permission items** close themselves once the rule is in the matching `settings.json`.
+- **Installed copies** carry `VERSION`, and `inventory.py` flags outdated ones. `install` keeps previous options.
+- **Tracked file locally.** Once the cloud has committed the file, local runs show it as modified. That's documented, not changed: it's how local review results travel back.
+
 ### The pending notice
 
 - A SessionStart hook counts pending items and adds a line to context. Claude then mentions it once at the end of its first reply: *"7 setup suggestions pending. Run /claude-setup review to look."*
