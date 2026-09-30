@@ -368,7 +368,7 @@ def lint_settings(path, data, project, scope):
                 entry["issues"] = issues
                 hook_list.append(entry)
     out["hooks"] = hook_list
-    out["allow_rules"] = allow[:25] + ([f"... {len(allow) - 25} more"] if len(allow) > 25 else [])
+    out["allow_rules"] = allow[:80] + ([f"... {len(allow) - 80} more"] if len(allow) > 80 else [])
     out["ask_rules"] = ask[:40]
     out["deny_rules"] = deny
     for k in ("model", "outputStyle", "autoMemoryEnabled", "claudeMdExcludes", "sandbox",
@@ -504,7 +504,7 @@ def main():
     report = {"project": str(project), "git_root": str(git_root) if git_root else None,
               "is_git_repo": bool(git_root), "claude_md_stack": [], "nested_claude_md": [],
               "agents_md": [], "rules": [], "skills": [], "agents": [], "commands": [],
-              "output_styles": [], "settings": [], "mcp": [], "auto_memory": None,
+              "output_styles": [], "workflows": [], "settings": [], "mcp": [], "auto_memory": None,
               "gitignore": {}, "secrets": [], "duplicates": [], "migration_sources": [],
               "project_signals": {}}
 
@@ -622,7 +622,8 @@ def main():
             for p in sorted(sd.glob("*/SKILL.md")):
                 report["skills"].append(lint_skill(p, project, scope))
             for p in sorted(sd.iterdir()):
-                if p.is_dir() and p.name != "synced" and not (p / "SKILL.md").exists():
+                # synced/ holds claude.ai skills; dot-dirs (.trash) are app housekeeping, not skills
+                if p.is_dir() and p.name != "synced" and not p.name.startswith(".") and not (p / "SKILL.md").exists():
                     report["skills"].append({"name": p.name, "scope": scope, "path": rel(p, project),
                                              "flags": ["directory has no SKILL.md (not loaded)"]})
             for p in sorted(sd.glob("*.md")):
@@ -640,6 +641,10 @@ def main():
         if od.exists():
             for p in sorted(od.glob("*.md")):
                 report["output_styles"].append(lint_simple_md(p, project, scope, "output-style"))
+        wd = base / "workflows"
+        if wd.exists():
+            for p in sorted(wd.glob("*.js")):
+                report["workflows"].append({"name": p.stem, "scope": scope, "path": rel(p, project)})
     names = {}
     for s in report["skills"] + report["commands"]:
         names.setdefault(s["name"], []).append(s["path"])
@@ -745,7 +750,9 @@ def main():
     # gitignore hygiene
     for name in ("CLAUDE.local.md", ".claude/settings.local.json"):
         p = project / name
-        if p.exists():
+        if p.exists() and not git_root:
+            report["gitignore"][name] = {"note": "not a git repo; nothing is committed"}
+        elif p.exists():
             g = {"ignored": is_ignored(p, project, git_root), "tracked": is_tracked(p, project, git_root)}
             if g["tracked"]:
                 g["flag"] = "medium: personal file is committed; git rm --cached + add to .gitignore"
@@ -763,8 +770,10 @@ def main():
     for name in (".claude/settings.json", ".mcp.json", "CLAUDE.md"):
         p = project / name
         if p.exists() and git_root:
-            report["gitignore"][name] = {"tracked": is_tracked(p, project, git_root),
-                                         "note": "should normally be committed"}
+            g = {"tracked": is_tracked(p, project, git_root), "note": "should normally be committed"}
+            if not g["tracked"]:
+                g["flag"] = "low: not committed; teammates and cloud sessions don't get it"
+            report["gitignore"][name] = g
 
     report["duplicates"] = find_duplicates(loaded_texts)
     total = sum(i["approx_tokens"] for i in report["claude_md_stack"]) + \
@@ -825,6 +834,11 @@ def main():
     def learn_version(path):
         m = re.search(r'^VERSION = "([^"]+)"', read_text(path) or "", re.M)
         return m.group(1) if m else "unknown (pre-2.0)"
+
+    def older(v, cur):
+        def parts(s):
+            return tuple(int(x) for x in re.findall(r"\d+", s)) or (0,)
+        return v.startswith("unknown") or parts(v) < parts(cur)
     current = learn_version(Path(__file__).parent / "learn.py")
     copies = [("project", Path(project) / ".claude" / "hooks" / "claude-setup-learn.py")]
     if not args.no_user:
@@ -834,14 +848,14 @@ def main():
         if path.exists():
             v = learn_version(path)
             lh["installed"].append({"scope": scope, "path": str(path), "version": v,
-                                    "outdated": v != current})
+                                    "outdated": older(v, current)})
     sf = Path(project) / ".claude" / "setup-suggestions.md"
     if sf.exists():
         text = read_text(sf) or ""
         lh["suggestions_file"] = str(sf)
         lh["suggestions_conflicted"] = "\n<<<<<<< " in "\n" + text
-    if lh["installed"] or sf.exists():
-        report["learning_hook"] = lh
+    # always present, so "not installed" reads differently from "this inventory predates the check"
+    report["learning_hook"] = lh
 
     json.dump(report, sys.stdout, indent=1 if not args.json else None, default=str, ensure_ascii=False)
     print()

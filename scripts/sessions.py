@@ -13,6 +13,7 @@ Usage:
 import argparse
 import collections
 import json
+import os
 import re
 import sys
 import time
@@ -33,6 +34,11 @@ all any some more there here its it's im i'm dont don't lets let's want need thi
 other know stuff only right being they them thing things work well that's because actually really see
 use sure going good still even way got something same new back into over time much very add made
 kind bit lot everything anything maybe probably though them those these then than been being""".split())
+# MCP servers the desktop app provides itself; they can't be configured or disabled per project
+APP_SERVERS = {"Claude_Browser", "Claude_Preview", "visualize", "terminal", "claude-in-chrome", "computer-use"}
+SHELL_WORDS = {"for", "if", "while", "until", "do", "done", "then", "else", "elif", "fi", "case", "esac",
+               "echo", "cd", "export", "set", "true", "time", "{", "}"}
+RUNNABLE_EXT = {"", ".exe", ".py", ".sh", ".js", ".mjs", ".ps1", ".cmd", ".bat"}
 SKIP_PREFIXES = ("This session is being continued", "Base directory for this skill", "<command-", "<local-command", "<system-reminder", "<task-notification", "Caveat:",
                  "[Request interrupted", "<bash-", "<user-prompt-submit-hook")
 
@@ -62,26 +68,70 @@ def norm_words(t):
     return [w for w in re.findall(r"[a-z][a-z'\-]+", t) if w not in STOP and len(w) > 2]
 
 
+def lp(p):
+    """Windows paths past MAX_PATH (desktop-app scratch workspaces) need the \\\\?\\ prefix."""
+    s = os.path.abspath(str(p))
+    return Path("\\\\?\\" + s) if os.name == "nt" and len(s) >= 248 and not s.startswith("\\\\?\\") else Path(p)
+
+
+def mtime(f):
+    try:
+        return lp(f).stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def split_chain(cmd):
+    """Split on ; && || and newlines outside quotes. Heredoc bodies are dropped first."""
+    cmd = re.sub(r"<<-?\s*['\"]?\w+['\"]?.*", "", cmd.replace("\\\n", " "), flags=re.S)
+    parts, cur, q, i = [], "", None, 0
+    while i < len(cmd):
+        c = cmd[i]
+        if q:
+            q = None if c == q else q
+        elif c in "\"'":
+            q = c
+        elif c in ";\n" or cmd[i:i + 2] in ("&&", "||"):
+            parts.append(cur)
+            cur = ""
+            i += 2 if c in "&|" else 1
+            continue
+        cur += c
+        i += 1
+    return [p.strip() for p in parts + [cur] if p.strip()]
+
+
 def bash_key(cmd):
-    cmd = cmd.strip()
-    cmd = re.sub(r"^(cd\s+\S+\s*(&&|;)\s*)+", "", cmd)
-    cmd = re.sub(r"<<-?\s*['\"]?\w+['\"]?.*", "", cmd, flags=re.S)
-    toks = re.findall(r"\"[^\"]*\"|'[^']*'|\S+", cmd)
+    toks = re.findall(r"\"[^\"]*\"|'[^']*'|\S+", cmd.strip())
+    while toks and toks[0] in ("do", "then", "else", "time"):
+        toks = toks[1:]
     if not toks:
         return ""
-    head = toks[0].split("/")[-1].split("\\")[-1].strip("\"'")
-    if not re.match(r"^[\w.\-]+$", head) or head in ("for", "if", "while", "echo", "cd", "export", "set", "true"):
+    head = toks[0].strip("\"'").replace("\\", "/").split("/")[-1]
+    head = re.sub(r"\.exe$", "", head, flags=re.I)
+    if (not re.match(r"^[\w.\-]+$", head) or head in SHELL_WORDS
+            or os.path.splitext(head)[1].lower() not in RUNNABLE_EXT):
         return ""
-    sub = [t for t in toks[1:3] if not t.startswith(("-", "\"", "'", "/", ".", "$")) and len(t) < 30]
+    rest = toks[1:]
+    if head in ("python", "python3", "py") and rest[:1] == ["-m"] and len(rest) > 1:
+        return f"{head} -m {rest[1]}"
+    sub = [t for t in rest[:2] if re.match(r"^[\w:.\-/]+$", t) and not t.startswith(("-", "/", "."))
+           and len(t) < 30]
     return " ".join([head] + sub[:1 if head in ("git", "npm", "pnpm", "yarn", "bun", "cargo", "go",
-                                                  "docker", "python", "node", "npx", "uv", "make",
-                                                  "rojo", "wally", "gh", "kubectl") else 0])
+                                                  "docker", "python", "py", "node", "npx", "uv", "make",
+                                                  "rojo", "wally", "gh", "kubectl", "railway") else 0])
+
+
+def shell_keys(cmd, powershell=False):
+    """One key per command in a chain (a leading `cd x &&` is skipped by SHELL_WORDS)."""
+    keys = [k for k in (bash_key(p) for p in split_chain(cmd)) if k]
+    return ["ps: " + k for k in keys] if powershell else keys
 
 
 def project_cwd(f):
     """The real project path, from the first transcript line that records a cwd."""
     try:
-        with f.open(encoding="utf-8", errors="replace") as fh:
+        with lp(f).open(encoding="utf-8", errors="replace") as fh:
             for i, line in enumerate(fh):
                 if i > 50:
                     break
@@ -98,14 +148,19 @@ def list_projects(days):
     cutoff = time.time() - days * 86400
     rows = {}
     for d in (base.iterdir() if base.exists() else []):
-        files = [f for f in d.glob("*.jsonl") if f.stat().st_mtime >= cutoff] if d.is_dir() else []
+        files = [f for f in d.glob("*.jsonl") if mtime(f) >= cutoff] if d.is_dir() else []
         if not files:
             continue
-        newest = max(files, key=lambda f: f.stat().st_mtime)
+        newest = max(files, key=mtime)
         path = project_cwd(newest) or d.name
+        # tool-generated sessions (claude-mem's observer) aren't a project
+        if re.search(r"[\\/]\.claude-mem([\\/]|$)", path):
+            continue
+        # a worktree's sessions belong to its repo
+        path = re.split(r"[\\/]\.claude[\\/]worktrees[\\/]", path)[0]
         r = rows.setdefault(path, {"project": path, "sessions": 0, "last_active": 0})
         r["sessions"] += len(files)
-        r["last_active"] = max(r["last_active"], newest.stat().st_mtime)
+        r["last_active"] = max(r["last_active"], mtime(newest))
     out = sorted(rows.values(), key=lambda r: -r["last_active"])
     for r in out:
         r["last_active"] = datetime.fromtimestamp(r["last_active"], timezone.utc).strftime("%Y-%m-%d")
@@ -134,8 +189,8 @@ def main():
     base = USER_CLAUDE / "projects"
     dirs = [d for d in base.glob(enc + "*") if d.is_dir()] if base.exists() else []
     cutoff = time.time() - a.days * 86400
-    files = sorted((f for d in dirs for f in d.glob("*.jsonl") if f.stat().st_mtime >= cutoff),
-                   key=lambda f: f.stat().st_mtime, reverse=True)[: a.max_sessions]
+    files = sorted((f for d in dirs for f in d.glob("*.jsonl") if mtime(f) >= cutoff),
+                   key=mtime, reverse=True)[: a.max_sessions]
     if not files:
         print(json.dumps({"project": str(project), "sessions": 0,
                           "note": "no transcripts found for this project (new user, other machine, or cleaned up)"}))
@@ -147,14 +202,20 @@ def main():
     edited, fail_examples = collections.Counter(), {}
     tool_use_index = {}
     models, first_ts, last_ts = collections.Counter(), None, None
+    seen_uuids = set()  # resumed and forked sessions replay earlier records with the same uuid
 
     for f in files:
         sid = f.stem
-        for line in f.open(encoding="utf-8", errors="replace"):
+        for line in lp(f).open(encoding="utf-8", errors="replace"):
             try:
                 d = json.loads(line)
             except Exception:
                 continue
+            uid = d.get("uuid")
+            if uid:
+                if uid in seen_uuids:
+                    continue
+                seen_uuids.add(uid)
             t = d.get("type")
             ts = d.get("timestamp")
             if ts:
@@ -206,16 +267,21 @@ def main():
                     tools[name] += 1
                     key = None
                     if name in ("Bash", "PowerShell"):
-                        key = bash_key(str(inp.get("command", "")))
-                        if key:
-                            bash_runs[key] += 1
+                        keys = shell_keys(str(inp.get("command", "")), name == "PowerShell")
+                        for k in keys:
+                            bash_runs[k] += 1
+                        # a chain's exit status is its last command's, so failures are blamed there
+                        key = keys[-1] if keys else None
                     elif name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
                         p = str(inp.get("file_path", ""))
                         try:
                             p = str(Path(p).resolve().relative_to(project)).replace("\\", "/")
                         except Exception:
                             p = p.replace(str(Path.home()), "~").replace("\\", "/")
-                        edited[p] += 1
+                        # worktree edits count toward the real file; scratch and temp files aren't the project
+                        p = re.sub(r"^\.claude/worktrees/[^/]+/", "", p)
+                        if not re.search(r"(^|/)(AppData/Local/Temp|tmp)/|/scratchpad/", p):
+                            edited[p] += 1
                     elif name == "Skill":
                         skills[str(inp.get("skill", "?"))] += 1
                     elif name in ("Agent", "Task"):
@@ -250,10 +316,12 @@ def main():
         if ps:
             openers[" ".join(norm_words(ps[0])[:4])] += 1
 
-    mcp_by_server = collections.Counter()
+    mcp_by_server, app_by_server = collections.Counter(), collections.Counter()
     for name, c in tools.items():
         if name.startswith("mcp__"):
-            mcp_by_server[name.split("__")[1]] += c
+            server = name.split("__")[1]
+            is_app = server in APP_SERVERS or server.startswith("ccd_")
+            (app_by_server if is_app else mcp_by_server)[server] += c
 
     top_edit_dirs = collections.Counter()
     for p, c in edited.items():
@@ -279,8 +347,8 @@ def main():
         "files_most_edited": edited.most_common(20),
         "areas_most_edited": top_edit_dirs.most_common(12),
         "tools": dict(tools.most_common(25)),
-        "mcp_servers_used": dict(collections.Counter(
-            {k: v for k, v in mcp_by_server.items()}).most_common(40)),
+        "mcp_servers_used": dict(mcp_by_server.most_common(40)),
+        "app_servers_used": dict(app_by_server.most_common(20)),
         "skills_used": dict(skills.most_common(20)),
         "subagents_used": dict(agents.most_common(15)),
         "slash_commands_used": dict(slash.most_common(20)),
