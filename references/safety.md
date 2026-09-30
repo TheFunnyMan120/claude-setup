@@ -68,7 +68,7 @@ Config lives under `hooks` in any settings file, in plugin `hooks/hooks.json`, a
 ```
 Types: `command`, `http`, `mcp_tool`, `prompt`, `agent`. Main events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd`, `Notification`, `InstructionsLoaded`, `ConfigChange`, `FileChanged`, among others. Matchers take regexes on the tool name (`Edit|Write`, `mcp__github__.*`) for tool events, and on the source for SessionStart (`startup|resume|clear|compact`).
 Exit codes: **0** means proceed (stdout is added to context for SessionStart and UserPromptSubmit). **2** means block, and stderr is fed back to Claude. Any other code is a non-blocking error unless stdout is valid JSON. PreToolUse JSON: `hookSpecificOutput.permissionDecision` = `allow|deny|ask|defer`, plus `permissionDecisionReason`.
-Timeouts: command hooks default to 10 min (30 s for UserPromptSubmit), prompt hooks to 30 s, agent hooks to 60 s. SessionEnd gets 1.5 s total across all its hooks.
+Timeouts: command hooks default to 10 min (30 s for UserPromptSubmit), prompt hooks to 30 s, agent hooks to 60 s. SessionEnd hooks are killed after roughly 1.5-3.5 s (measured ~3.4 s on 2.1.285), even on a clean exit, so anything slow there must detach, and a detached process dies with a cloud container. Hooks on the same event run in parallel, not in order.
 
 Hooks run arbitrary code with the user's full permissions, automatically. Review each one like production code:
 - **Quote** every variable (`"$CLAUDE_PROJECT_DIR"`, `"$file"`), because paths contain spaces (for example `My Project`).

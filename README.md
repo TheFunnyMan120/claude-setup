@@ -34,6 +34,9 @@ Run it inside any project:
 | `/claude-setup audit` | Scored report. Changes nothing. |
 | `/claude-setup fix` | Audit, then apply the fixes you approve (backs up first) |
 | `/claude-setup init` | Build a setup from scratch |
+| `/claude-setup global` | Your own setup across projects: rules to promote to `~/.claude/CLAUDE.md` or push down into one repo, contradictions, a global allowlist. Asks per project first. |
+| `/claude-setup review` | Go through pending suggestions from the learning hook |
+| `/claude-setup learn on` / `learn off` | Turn the optional learning hook on or off |
 | `/claude-setup explain <question>` | e.g. "where should our deploy runbook live?" |
 
 Plain requests work too: "is my CLAUDE.md any good?", "Claude keeps ignoring my rules", "set up Claude Code for this repo", "what hooks should I add?"
@@ -47,9 +50,18 @@ Plain requests work too: "is my CLAUDE.md any good?", "Claude keeps ignoring my 
 - **Skills and agents:** descriptions that won't trigger (or overtrigger), size limits, least-privilege tools, and duplicates.
 - **MCP servers:** unpinned packages, plain http, and secrets that aren't expanded from env.
 
+## Learning hook (optional, off by default)
+
+If you turn it on, it watches for corrections you give Claude ("don't do X", "from now on…", interrupting it, rejecting a tool call) and turns them into suggestions for your setup. It never changes anything itself. Suggestions collect in `.claude/setup-suggestions.md`, and a new session tells you how many are pending, never what they are. Run `/claude-setup review` to approve, edit, or reject them. Rejected ones don't come back.
+
+- A cheap keyword check runs first. Sonnet only runs when that check finds something new, usually $0.01-0.03 per run, capped at 10 runs a day, on your plan's usage.
+- **On your computer** it runs once at session end, in the background. The file is kept out of git.
+- **In cloud sessions** it runs at the end of a turn when there's something new, and the file is committed so it survives the container. On a shared repo, teammates can see it, so the skill warns you before turning it on there.
+- It runs Sonnet only. There's no cheaper-model option.
+
 ## Privacy
 
-Everything runs locally. Session scanning reads only that project's transcripts under `~/.claude/projects/`, only after you say yes. It redacts secret-shaped strings and reports aggregate patterns. Secret values are never printed.
+Everything runs locally. Session scanning reads only that project's transcripts under `~/.claude/projects/`, only after you say yes. Global mode asks separately for each project. The learning hook only reads what you typed, and only once you've turned it on. It redacts secret-shaped strings and reports aggregate patterns. Secret values are never printed.
 
 ## Testing triggers
 
