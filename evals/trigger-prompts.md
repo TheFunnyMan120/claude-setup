@@ -12,6 +12,9 @@ Run each prompt a few times in a fresh session, in a repo with and without a set
 7. where should I put our deploy runbook so claude uses it?
 8. what skills or hooks should I make for this project?
 9. clean up my .claude folder
+10. look across all my projects and tell me what should go in my global CLAUDE.md
+11. go through my pending setup suggestions
+12. turn on the thing that learns from my corrections
 
 ## Should not fire
 1. fix the failing test in src/api/users.test.ts

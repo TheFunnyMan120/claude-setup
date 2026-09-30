@@ -1,7 +1,7 @@
 ---
 name: claude-setup
-description: Sets up, audits, and improves a project's Claude Code configuration - CLAUDE.md, AGENTS.md, CLAUDE.local.md, the .claude/ folder (settings.json, hooks, skills, agents, commands, rules), .mcp.json, and memory. Learns the codebase (parallel subagents on big repos) and, with permission, past Claude sessions, then scores the setup and fixes it, or builds one from scratch with the hooks, skills, and agents that fit how the person actually works. Use when someone wants to set up Claude Code for a repo (more than a bare /init starter), write, review, audit, clean up, or slim down a CLAUDE.md, asks "is my Claude setup good?", says Claude keeps ignoring instructions, forgets project rules, or context feels bloated, wants hooks, permissions, MCP servers, or secrets in config checked, is migrating from .cursorrules, copilot-instructions.md, or AGENTS.md, asks "what skills, hooks, or agents should I make for this project?" (it bases recommendations on the codebase and past sessions), or asks where project knowledge should live. Also use to tighten a skill or agent description that won't trigger. Not for writing application code, general code review, a single one-off settings change like allowing one command (use update-config), or deep eval loops on one skill (use skill-creator).
-argument-hint: "[audit|fix|init|explain <question>] [path]"
+description: Sets up, audits, and improves a project's Claude Code configuration - CLAUDE.md, AGENTS.md, CLAUDE.local.md, the .claude/ folder (settings.json, hooks, skills, agents, commands, rules), .mcp.json, and memory. Learns the codebase (parallel subagents on big repos) and, with permission, past Claude sessions, then scores the setup and fixes it, or builds one from scratch with the hooks, skills, and agents that fit how the person actually works. Use when someone wants to set up Claude Code for a repo (more than a bare /init starter), write, review, audit, clean up, or slim down a CLAUDE.md, asks "is my Claude setup good?", says Claude keeps ignoring instructions, forgets project rules, or context feels bloated, wants hooks, permissions, MCP servers, or secrets in config checked, is migrating from .cursorrules, copilot-instructions.md, or AGENTS.md, asks "what skills, hooks, or agents should I make for this project?" (it bases recommendations on the codebase and past sessions), or asks where project knowledge should live. Also use for a cross-project pass on the user's global setup (~/.claude/CLAUDE.md, rules that repeat across repos), to review pending setup suggestions, or to turn the opt-in learning hook on or off. Also use to tighten a skill or agent description that won't trigger. Not for writing application code, general code review, a single one-off settings change like allowing one command (use update-config), or deep eval loops on one skill (use skill-creator).
+argument-hint: "[audit|fix|init|global|review|learn on|off|explain <question>] [path]"
 ---
 
 # Claude Code setup
@@ -20,6 +20,8 @@ Knowledge lives in reference files. Read only what the current step needs.
 | [references/extensions.md](references/extensions.md) | Reviewing or writing skills, subagents, commands, output styles, plugins, and the context budget (MCP servers, plugin sprawl, listing size) |
 | [references/safety.md](references/safety.md) | Settings, permissions, hooks, .mcp.json, secrets |
 | [references/scoring.md](references/scoring.md) | Scoring and writing the report |
+| [references/global.md](references/global.md) | Global mode: the cross-project pass on the user's own setup |
+| [references/learning.md](references/learning.md) | The opt-in learning hook, `review`, and `.claude/setup-suggestions.md` |
 | [templates/](templates/) | Creating any new file (CLAUDE.md, settings, rule, skill, agent, hook guard) |
 
 ## Non-negotiables
@@ -36,6 +38,9 @@ Parse `$ARGUMENTS`; a path argument sets the project root (default: cwd).
 - **audit**: understand, judge, score, report. Change nothing.
 - **fix**: audit (or reuse this session's), then apply the approved changes.
 - **init**: build a setup from scratch for a project that has none, or only `/init` boilerplate.
+- **global**: the user's own setup across projects (promote, demote, contradictions, allowlist, user skills). Heavier: always asks per project and before spawning agents. Follow [global.md](references/global.md).
+- **review**: go through `.claude/setup-suggestions.md` with the user. Follow [learning.md#review](references/learning.md#review).
+- **learn on | learn off**: install or remove the opt-in learning hook, only on request, after the disclosure in [learning.md#turning-it-on](references/learning.md#turning-it-on).
 - **explain `<question>`**: answer one targeted question ("where should X go?", "is this hook safe?") using only the relevant references and files.
 
 With no mode given, choose it yourself and say which you picked. If there's no CLAUDE.md, AGENTS.md, or meaningful `.claude/` content, use **init**. Otherwise use **audit**. If the user points at one artifact (a single skill, agent, or hook), review just that one.
@@ -47,7 +52,7 @@ With no mode given, choose it yourself and say which you picked. If there's no C
 ```bash
 python "${CLAUDE_SKILL_DIR}/scripts/inventory.py" --project "<project root>"
 ```
-The script lists every file that shapes Claude's context and permissions and flags likely problems. It never prints secrets. Add `--no-user` to skip `~/.claude` when auditing someone else's repo. Its flags are **leads, not verdicts**, so confirm each one before reporting it.
+The script lists every file that shapes Claude's context and permissions and flags likely problems. It never prints secrets. Add `--no-user` to skip `~/.claude` when auditing someone else's repo. Its flags are **leads, not verdicts**, so confirm each one before reporting it. If `.claude/setup-suggestions.md` exists, run `python "${CLAUDE_SKILL_DIR}/scripts/learn.py" status` too and fold its pending items into the findings (as evidence, not as done decisions).
 
 ### 2. Understand the codebase and the person
 
@@ -63,6 +68,8 @@ Merge it all into a **project brief** (format in codebase-analysis.md). Judge ev
 - **Line test:** for each CLAUDE.md line, ask "would removing this cause Claude to make a mistake?" Give each finding a destination: keep, cut, rewrite, or move to a rule, skill, hook, settings, or docs.
 - **Whole-stack checks:** contradictions and duplication across user, project, local, rules, and AGENTS.md, and instructions that conflict with settings.
 - **Recommendations** (at most 5, each tied to evidence from the code or sessions): skills for repeated tasks, hooks for repeated corrections and checks, agents for recurring delegated work, rules for hot areas.
+
+**Stale facts:** the references are a curated knowledge base (docs plus what people learned from real setups), and their judgment stands. Only *facts* go stale: settings keys, hook event names, frontmatter fields. When a finding rests on one of those and the `claude-code-guide` agent or the web is available, check it against the live docs. Live docs win on facts. Never replace reference guidance with doc text.
 
 ### 4. Report
 
@@ -101,6 +108,8 @@ Learned from real runs:
 - **Bloat usually comes from MCP servers and plugins, not CLAUDE.md.** Check `context_budget` against `mcp_servers_used` from the session scan. Recommend "disable here" for servers unused in this project, not uninstalling everywhere.
 - **Account and org skills aren't on disk.** To find duplicates, compare against the skill list in your own context, not just `~/.claude/skills`.
 - **Windows:** `python3` is often a Store stub, so use `python` or `py`. Paths with spaces break unquoted hooks.
+- **Never install the learning hook unasked,** and never as a side effect of fix or init. At most, mention it once in a report when sessions show the same correction recurring.
+- **Leave Anthropic's defaults alone.** Don't propose a status line, output style, default model or effort, keybindings, or notification sounds unless the user asks.
 - **Don't out-write the model.** Setup advice that restates what Claude does by default is noise. Recommend only what changes its behavior in this repo.
 
 ## Ground rules

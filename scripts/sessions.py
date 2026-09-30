@@ -8,6 +8,7 @@ used, and actions users reject. Output is aggregate + short redacted snippets.
 
 Usage:
   python sessions.py [--project PATH] [--days 90] [--max-sessions 300]
+  python sessions.py --list-projects [--days 90]   # for global mode: which projects have history
 """
 import argparse
 import collections
@@ -77,6 +78,43 @@ def bash_key(cmd):
                                                   "rojo", "wally", "gh", "kubectl") else 0])
 
 
+def project_cwd(f):
+    """The real project path, from the first transcript line that records a cwd."""
+    try:
+        with f.open(encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i > 50:
+                    break
+                cwd = json.loads(line).get("cwd") if '"cwd"' in line else None
+                if cwd:
+                    return cwd
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def list_projects(days):
+    base = USER_CLAUDE / "projects"
+    cutoff = time.time() - days * 86400
+    rows = {}
+    for d in (base.iterdir() if base.exists() else []):
+        files = [f for f in d.glob("*.jsonl") if f.stat().st_mtime >= cutoff] if d.is_dir() else []
+        if not files:
+            continue
+        newest = max(files, key=lambda f: f.stat().st_mtime)
+        path = project_cwd(newest) or d.name
+        r = rows.setdefault(path, {"project": path, "sessions": 0, "last_active": 0})
+        r["sessions"] += len(files)
+        r["last_active"] = max(r["last_active"], newest.stat().st_mtime)
+    out = sorted(rows.values(), key=lambda r: -r["last_active"])
+    for r in out:
+        r["last_active"] = datetime.fromtimestamp(r["last_active"], timezone.utc).strftime("%Y-%m-%d")
+        r["exists"] = Path(r["project"]).exists()
+        r["has_suggestions_file"] = (Path(r["project"]) / ".claude" / "setup-suggestions.md").exists()
+    json.dump({"projects": out, "days": days}, sys.stdout, indent=1)
+    print()
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -86,7 +124,11 @@ def main():
     ap.add_argument("--project", default=".")
     ap.add_argument("--days", type=int, default=90)
     ap.add_argument("--max-sessions", type=int, default=300)
+    ap.add_argument("--list-projects", action="store_true",
+                    help="list projects with session history (paths, counts, dates only; reads no prompts)")
     a = ap.parse_args()
+    if a.list_projects:
+        return list_projects(a.days)
     project = Path(a.project).resolve()
     enc = encoded(project)
     base = USER_CLAUDE / "projects"
@@ -130,7 +172,9 @@ def main():
                         if isinstance(b, dict) and b.get("type") == "tool_result":
                             txt = json.dumps(b.get("content"))[:600]
                             tu = tool_use_index.get(b.get("tool_use_id"))
-                            if "doesn't want to proceed" in txt or "was rejected" in txt:
+                            raw = b.get("content")
+                            first = raw if isinstance(raw, str) else " ".join(texts_of(raw))
+                            if b.get("is_error") and first.lstrip().startswith("The user doesn't want to"):
                                 rejected[tu[0] if tu else "?"] += 1
                             elif b.get("is_error") and tu and tu[0] in ("Bash", "PowerShell") and tu[1]:
                                 bash_fail[tu[1]] += 1
