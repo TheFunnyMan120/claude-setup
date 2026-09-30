@@ -34,7 +34,7 @@ An optional hook that turns corrections from sessions into setup suggestions the
 
 Only when the user asks. Before installing, say plainly:
 - It calls Sonnet on sessions where the prefilter finds a correction. Tested cost is about $0.01-0.03 per run, capped at 10 runs a day and $0.25 per run, and it uses their plan's usage.
-- It reads only what they typed, plus interrupts and rejections, and it writes suggestions to `.claude/setup-suggestions.md`.
+- It reads only what they typed, plus interrupts and rejections, and it writes suggestions to `.claude/setup-suggestions.md`. Its own state (log, daily-run counter, locks) lives in `~/.claude/claude-setup/`.
 - **In the cloud:** that file is committed and pushed. **For a shared team repo, warn** that their suggestions (short paraphrases of their corrections) become visible to teammates, and that the hook script and settings entry are committed too (they're inert for teammates).
 - There's no cheaper-model option on purpose. In testing, the smaller model was noisier (it kept one-time instructions) and wasn't cheaper.
 
@@ -77,6 +77,8 @@ Measured on Claude Code 2.1.285 (2026-09-30):
 - Hooks on the same event run in parallel.
 - `--bare` only accepts an API key, so subscription users can't use it. The hook uses the normal CLI with a short system prompt instead.
 - Cloud sessions ship their own Stop hook that blocks while files are uncommitted or unpushed, and it expects Claude-signed commits. That's why Claude commits the suggestions file, not the hook.
+- The model call must be isolated (`--setting-sources project` from a folder with no settings, `--strict-mcp-config`, `--disable-slash-commands`). Otherwise the child loads every plugin, MCP server and user hook: a one-line prompt cost $0.27 on a setup with 12 plugins, versus $0.011 isolated, and the user's own hooks (memory plugins) fired inside it.
+- On Windows, npm installs `claude.cmd`, which passes arguments through cmd.exe and cuts multi-line ones at the first newline. The hook calls the `claude.exe` it wraps.
 - The session-start notice arrives as part of Claude's reply, so it shows in the app, on the web, and in the terminal.
 
 Debugging: `~/.claude/claude-setup/learn.log` records each run (signal counts, cost, discarded output). `learn.py prefilter --all-projects` shows how many recent sessions would have called the model, which is the best cost estimate.

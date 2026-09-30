@@ -39,7 +39,7 @@ FILE_REL = Path(".claude") / "setup-suggestions.md"
 STATE_BEGIN, STATE_END = "<!-- claude-setup:state", "-->"
 CHILD_ENV = "CLAUDE_SETUP_LEARN_CHILD"
 HOOK_NAME = "claude-setup-learn.py"
-VERSION = "2.0.0"  # installed copies carry this; inventory.py flags copies older than the skill's
+VERSION = "2.0.2"  # installed copies carry this; inventory.py flags copies older than the skill's
 MODEL = "sonnet"
 IS_CLOUD = os.environ.get("CLAUDE_CODE_REMOTE", "").lower() == "true"
 
@@ -580,15 +580,30 @@ def build_prompt(root, items, signals):
             f"SESSION EXCERPTS (text the user typed, plus interrupts and rejected tool calls)\n{sig}")
 
 
-def call_model(prompt, budget):
+def claude_exe():
     exe = shutil.which("claude")
+    # npm's claude.cmd forwards args through cmd.exe, which cuts the multi-line system prompt at the
+    # first newline and mangles the schema's quotes; call the binary it wraps instead
+    if exe and os.name == "nt" and Path(exe).suffix.lower() in (".cmd", ".bat"):
+        real = Path(exe).parent / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+        if real.exists():
+            return str(real)
+        log(f"only found {Path(exe).name}; multi-line arguments may not survive cmd.exe")
+    return exe
+
+
+def call_model(prompt, budget):
+    exe = claude_exe()
     if not exe:
         log("claude CLI not on PATH; skipped")
         return None
     env = dict(os.environ, **{CHILD_ENV: "1"})
+    # Isolated: cwd is STATE_DIR (no project settings), so "project" skips the user's plugins, MCP
+    # servers and hooks. Without this a loaded setup costs ~$0.25 a run and trips --max-budget-usd.
     cmd = [exe, "-p", "--model", MODEL, "--output-format", "json", "--json-schema", json.dumps(SCHEMA),
            "--no-session-persistence", "--tools", "", "--system-prompt", SYSTEM_PROMPT,
-           "--max-budget-usd", str(budget)]
+           "--max-budget-usd", str(budget), "--setting-sources", "project",
+           "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands"]
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=300, env=env,
@@ -620,21 +635,24 @@ def cmd_analyze(a):
         state = load_json(state_p, {"offsets": {}, "runs": {}})
         key = str(Path(a.transcript).resolve())
         signals, new_off = prefilter(a.transcript, state["offsets"].get(key, 0))
-        state["offsets"][key] = new_off
         state["runs"] = {d: n for d, n in state.get("runs", {}).items() if d >= today()}
         if not signals:
+            state["offsets"][key] = new_off
             write_atomic(state_p, json.dumps(state))
             return 0
         if state["runs"].get(today(), 0) >= a.daily_cap:
-            log(f"daily cap {a.daily_cap} reached; {len(signals)} signal(s) skipped")
+            log(f"daily cap {a.daily_cap} reached; {len(signals)} signal(s) kept for a later run")
             write_atomic(state_p, json.dumps(state))
             return 0
+        # a failed call still costs, so it counts toward the cap
         state["runs"][today()] = state["runs"].get(today(), 0) + 1
         write_atomic(state_p, json.dumps(state))
         items, repaired = load_state(root)
         proposals = call_model(build_prompt(root, items, signals), a.budget)
         if proposals is None:
-            return 0
+            return 0  # offset not advanced: these signals are retried next time
+        state["offsets"][key] = new_off
+        write_atomic(state_p, json.dumps(state))
         added = merge(items, proposals, a.session or Path(a.transcript).stem, root)
         reconcile(root, items, a.expire_days)
         if proposals or repaired or sugg_path(root).exists():
@@ -654,7 +672,13 @@ def only_account_ok(a):
 
 def cmd_session_end(a):
     d = read_stdin_json()
-    if os.environ.get(CHILD_ENV) or IS_CLOUD or not hook_input_ok(d):
+    if os.environ.get(CHILD_ENV):
+        return 0
+    if IS_CLOUD:
+        log("session-end: cloud session; the Stop hook handles it")
+        return 0
+    if not hook_input_ok(d):
+        log("session-end: hook input had no valid transcript_path; skipped")
         return 0
     args = [sys.executable, os.path.abspath(__file__), "analyze", "--transcript", d["transcript_path"],
             "--cwd", d.get("cwd") or os.getcwd(), "--session", str(d.get("session_id") or ""),

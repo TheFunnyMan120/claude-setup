@@ -9,7 +9,7 @@
       "name": "claude-setup",
       "source": "./",
       "description": "Sets up, audits, and improves Claude Code for any project.",
-      "version": "2.0.1"
+      "version": "2.0.2"
     }
   ]
 }
