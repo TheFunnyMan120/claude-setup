@@ -41,7 +41,7 @@ It also adds a smaller change: **a stale-fact check** against the live docs.
   - **Local-only preferences:** "this preference lives only in `~/.claude` on this machine, so cloud sessions never see it. Move it into an account skill or the repo if you want it there."
 - **Suggests project edits only where the cross-project view adds something:** duplicates, contradictions, and misplaced rules. For anything deeper it says "run `/claude-setup audit` in that repo."
 
-### Cloud limits (verified in a cloud container, Sep 2026)
+### Cloud limits (verified Sep 2026)
 
 - **Carried over:** claude.ai account skills (synced in), connectors, and what's committed in the repo.
 - **Not carried over:** local `~/.claude/CLAUDE.md`, auto-memory, and past session transcripts (only the current session's is there).
@@ -178,7 +178,7 @@ When the `claude-code-guide` agent or network access is available, audit mode ch
 | `/claude-setup review` | Walk through pending suggestions: approve, edit, reject |
 | `/claude-setup learn on\|off` | Install or remove the learning hook |
 
-## Test results (cloud container, Claude Code 2.1.285, 2026-09-30)
+## Test results (Claude Code 2.1.285, 2026-09-30)
 
 | Test | Result |
 |---|---|
@@ -203,20 +203,20 @@ When the `claude-code-guide` agent or network access is available, audit mode ch
 
 | Test | Result |
 |---|---|
-| Stop hook, cloud, run on this design session's own transcript against a CLAUDE.md with "Offer a Haiku model option" and "Run the learning hook on every turn" | 8 s, $0.028. Three strong items: remove the Haiku line, a **conflict** on the every-turn line, and a **global** "no attribution or session links in PRs". |
+| Stop hook in cloud mode, run on a real session transcript against a CLAUDE.md with "Offer a Haiku model option" and "Run the learning hook on every turn" | 8 s, $0.028. Three strong items: remove the Haiku line, a **conflict** on the every-turn line, and a **global** "no attribution or session links in PRs". |
 | Rerun on the same transcript | No model call (offset). Still exits 2 while the file is uncommitted, as intended. |
 | `stop_hook_active=true` | Exits 0 (no loop). |
 | Local SessionEnd | The hook returned in 0.09 s. The background run finished about 8 s later. The file was added to `.git/info/exclude` and didn't show in `git status`. |
 | Reconcile | After the Haiku line was deleted by hand, the Remove item was marked "already in place". |
 | Global item applied in the cloud | Refused, and it stays pending. |
 | Project install: other account, or not in the cloud | Both are no-ops. |
-| Real nested `claude -p` session with the project hooks installed | The user typed "from now on, always write commit messages in lowercase". The Stop hook produced a strong Add, and Claude committed and pushed the file. The first version of the hook message made Claude create a new branch and end on a commit summary. The final wording ("current branch, no new branch, stop without a summary") fixed both: Claude committed on the current branch, pushed, and ended with "Done." |
+| Real `claude -p` run with the project hooks installed | The user typed "from now on, always write commit messages in lowercase". The Stop hook produced a strong Add, and Claude committed and pushed the file. The first version of the hook message made Claude create a new branch and end on a commit summary. The final wording ("current branch, no new branch, stop without a summary") fixed both: Claude committed on the current branch, pushed, and ended with "Done." |
 | Install/uninstall into existing settings | Unrelated permissions and hooks kept, JSON re-parsed. |
 
 ## Still unverified
 
 - Whether a real cloud session ever fires SessionEnd before its container is reclaimed. This can't be observed from inside a session, and the cloud design doesn't depend on it.
-- Windows: the detached launch uses `DETACHED_PROCESS`. It's written but untested here (this container is Linux).
+- Windows: the detached launch uses `DETACHED_PROCESS`. It's written but untested (the tests ran on Linux).
 - How often a heavy user's sessions trip the prefilter, which decides the real cost. It needs a run over real transcripts once the prefilter exists.
 
 ## Decisions from review
